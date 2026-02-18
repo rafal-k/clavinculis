@@ -1,8 +1,8 @@
 # Clavinculis
 
-**Clavinculis** (_Claudius in vinculis_ — “Claude in chains”) is a small CLI wrapper that runs **Claude Code** inside a **bubblewrap** sandbox with **hard, OS-enforced project-only visibility**.
+**Clavinculis** (_Claudius in vinculis_ — "Claude in chains") is a small CLI wrapper that runs **Claude Code** or **OpenCode** inside a **bubblewrap** sandbox with **hard, OS-enforced project-only visibility**.
 
-The goal is simple: Claude can see and modify **one repo** (and its own sandbox HOME), and **nothing else** on your machine.
+The goal is simple: Your coding assistant can see and modify **one repo** (and its own sandbox HOME), and **nothing else** on your machine.
 
 ## Why
 
@@ -16,7 +16,7 @@ Clavinculis does this using Linux namespaces via `bwrap`.
 
 ## How it works (high level)
 
-Clavinculis launches `claude` in a dedicated mount namespace and mounts only:
+Clavinculis launches your coding assistant (`claude` or `opencode`) in a dedicated mount namespace and mounts only:
 
 - your **repo** (by default at `/work/<name>` in the sandbox)
 - a **sandbox HOME**:
@@ -42,13 +42,15 @@ Clavinculis **does not**:
 
 What it **does** provide:
 
-- OS-level enforcement of “Claude can’t read files outside the mounts you allow”.
+- OS-level enforcement of "your coding assistant can't read files outside the mounts you allow".
 
 ## Requirements
 
 - Linux with user namespaces enabled (typical on modern distros)
 - `bubblewrap` (`bwrap`) installed
-- Claude Code installed locally (`claude` on PATH), unless you pass `--claude-bin`
+- Claude Code or OpenCode installed locally (`claude` or `opencode` on PATH)
+  - Alternatively, specify the binary path with `--claude-bin` or `--opencode-bin`
+  - If both are installed, Claude Code is used by default (override with `--tool opencode`)
 
 On Debian:
 
@@ -85,6 +87,27 @@ Inside the sandbox the repo will appear at:
 /work/<repo-name>
 ```
 
+### Selecting the coding assistant
+
+By default, Clavinculis auto-detects which coding assistant is available (prefers Claude Code, then OpenCode). You can explicitly select one:
+
+```bash
+# Use Claude Code
+clavinculis --tool claude /path/to/repo
+
+# Use OpenCode
+clavinculis --tool opencode /path/to/repo
+
+# Specify custom binary paths
+clavinculis --opencode-bin /custom/path/to/opencode /path/to/repo
+```
+
+**Note:** Each tool uses its own isolated state directory:
+- Claude Code: `~/.claude-sandboxes/<repo-name>/home`
+- OpenCode: `~/.opencode-sandboxes/<repo-name>/home`
+
+This ensures complete isolation between tools working on the same repository.
+
 ### Common options
 
 #### Debug the OUTER sandbox (recommended)
@@ -102,7 +125,7 @@ readlink /proc/self/ns/mnt
 cat /proc/self/mountinfo | grep -E ' /work/| /home/| /tmp ' | head
 ```
 
-> Note: Claude Code may run its own *inner* sandbox for command execution. `--shell` avoids ambiguity by letting you inspect the outer sandbox directly.
+> Note: Coding assistants may run their own *inner* sandbox for command execution. `--shell` avoids ambiguity by letting you inspect the outer sandbox directly.
 
 #### Run arbitrary commands in the sandbox
 
@@ -123,11 +146,11 @@ Clavinculis offers three security profiles via `--profile`:
 - **Repo:** read-write (use `--ro-repo` to force read-only)
 - **`/etc`:** fully synthetic (generated passwd/group/hosts; no host metadata exposed)
 - **HOME:** persistent sandbox HOME under `~/.claude-sandboxes/<name>/home`
-- **Network:** enabled (required for Claude Code API)
+- **Network:** enabled (required for API access)
 - **SSH/Git:** not mounted (use `--with-ssh` / `--with-gitconfig` if needed)
 - **Extra binds:** none unless explicitly requested (prints warning)
 
-This is the recommended default: Claude Code works perfectly while host metadata is completely isolated.
+This is the recommended default: coding assistants work perfectly while host metadata is completely isolated.
 
 **`--profile balanced` (compatibility-friendly)**
 - **Repo:** read-write
@@ -180,7 +203,7 @@ clavinculis --no-etc /path/to/repo
 This creates an **empty** `/etc` (tmpfs only):
 - No DNS resolution
 - No TLS certificates
-- Claude Code **cannot** connect to Anthropic API
+- Coding assistant **cannot** connect to its API
 
 **Use cases:**
 - Testing what breaks without /etc
@@ -188,9 +211,9 @@ This creates an **empty** `/etc` (tmpfs only):
 - Extreme isolation scenarios where API access isn't needed
 - Research/experimentation
 
-**Note:** With `--no-etc`, you can still use `--shell` mode to inspect files, but Claude Code itself won't function.
+**Note:** With `--no-etc`, you can still use `--shell` mode to inspect files, but the coding assistant itself won't function.
 
-#### Max hygiene: don't persist Claude state
+#### Max hygiene: don't persist coding assistant state
 
 Useful if you don’t want credentials/session state written to disk:
 
@@ -219,7 +242,7 @@ Mount the repo read-only:
 clavinculis --ro-repo /path/to/repo
 ```
 
-Claude can still write to sandbox HOME (session/config/logs), but cannot modify the repo.
+The coding assistant can still write to sandbox HOME (session/config/logs), but cannot modify the repo.
 
 ### Mount location customization
 
@@ -235,16 +258,21 @@ Name the sandbox explicitly (affects mount path and persistent HOME location):
 ```bash
 clavinculis --name client-a /path/to/repo
 # => repo appears at /work/client-a
-# => persistent HOME at ~/.claude-sandboxes/client-a/home
+# => Claude Code persistent HOME: ~/.claude-sandboxes/client-a/home
+# => OpenCode persistent HOME: ~/.opencode-sandboxes/client-a/home
 ```
 
 ## Verify isolation (host-side, definitive)
 
-While `claude` is running under Clavinculis:
+While your coding assistant is running under Clavinculis:
 
 ```bash
+# For Claude Code
 pgrep -u "$USER" -n -a claude
-# take PID
+# For OpenCode
+pgrep -u "$USER" -n -a opencode
+
+# Take the PID and check mounts
 sudo cat /proc/<PID>/mountinfo | grep -E ' /work/| /home/| /tmp '
 ```
 
@@ -279,8 +307,8 @@ Results from a typical run: 36 tests passed, 6 skipped (sudo-only tests and envi
 ## Notes and caveats
 
 - **Git & SSH:** By default, your `~/.ssh` is not mounted, so git-over-SSH from inside the sandbox will not work unless you use `--with-ssh` and `--with-gitconfig`. Many users prefer to keep git operations outside the agent for safety and reviewability.
-- **Networking:** The sandbox shares the network namespace so Claude can function. If you want an "offline review shell", use `--shell` and modify the script to unshare net (out of scope for default operation).
-- **Compatibility:** Default strict profile (synthetic `/etc`) works perfectly for Claude Code. If something breaks, use `--profile balanced` or `--profile compat` / `--full-etc` for more host compatibility (at the cost of exposing host metadata).
+- **Networking:** The sandbox shares the network namespace so the coding assistant can function. If you want an "offline review shell", use `--shell` and modify the script to unshare net (out of scope for default operation).
+- **Compatibility:** Default strict profile (synthetic `/etc`) works perfectly for Claude Code and OpenCode. If something breaks, use `--profile balanced` or `--profile compat` / `--full-etc` for more host compatibility (at the cost of exposing host metadata).
 
 ## License
 

@@ -5,13 +5,13 @@ umask 077
 
 usage() {
   cat <<'EOF'
-clavinculis — run Claude Code with hard "project-only visibility" via bubblewrap.
+clavinculis — run Claude Code or OpenCode with hard "project-only visibility" via bubblewrap.
 
 OVERVIEW
-  Launches Claude inside a dedicated Linux mount namespace (bubblewrap).
+  Launches Claude Code or OpenCode inside a dedicated Linux mount namespace (bubblewrap).
   Only the repo you pass in is mounted into the sandbox (at /work/<name> by default),
   plus a minimal runtime filesystem (/usr, /bin, /lib*, /proc, /dev, /tmp).
-  Your real $HOME is NOT mounted. Instead, Claude gets a sandbox HOME.
+  Your real $HOME is NOT mounted. Instead, the coding assistant gets a sandbox HOME.
 
 SECURITY PROFILES
   Use --profile to choose a security/compatibility trade-off.
@@ -19,9 +19,10 @@ SECURITY PROFILES
   --profile strict (DEFAULT - maximum host privacy)
       - Project: mounted read-write (use --ro-repo to force RO)
       - /etc: fully synthetic (generated passwd/group/hosts; no host metadata)
-      - HOME: persistent sandbox HOME under ~/.claude-sandboxes/<name>/home
-              (use --ephemeral-home for tmpfs)
-      - Network: enabled (required for Claude Code API)
+      - HOME: persistent sandbox HOME (use --ephemeral-home for tmpfs)
+              Claude: ~/.claude-sandboxes/<name>/home
+              OpenCode: ~/.opencode-sandboxes/<name>/home
+      - Network: enabled (required for API access)
       - SSH/Git: not mounted (use --with-ssh / --with-gitconfig if needed)
       - Extra binds: none unless explicitly requested with --bind-ro/--bind-rw
             (strict prints a warning)
@@ -59,14 +60,20 @@ OPTIONS
       Example: --mount-base /project  => /project/<name>
 
   -s, --state-base PATH
-      Host path where per-sandbox state is stored (default: ~/.claude-sandboxes).
+      Host path where per-sandbox state is stored.
+      Default: ~/.claude-sandboxes (for Claude Code)
+              ~/.opencode-sandboxes (for OpenCode)
       Persistent sandbox HOME will be: <state-base>/<name>/home
 
   --profile balanced|strict|compat
       Security profile (see SECURITY PROFILES above). Default: strict
 
   --shell
-      Instead of launching Claude, start an interactive /bin/bash inside the sandbox.
+      Instead of launching the coding assistant, start an interactive /bin/bash inside the sandbox.
+
+  --tool claude|opencode
+      Select which coding assistant to use (default: auto-detect).
+      Auto-detection checks for 'claude' first, then 'opencode'.
 
   --
       End of clavinculis options.
@@ -134,6 +141,12 @@ OPTIONS
   --claude-share PATH
       Host path to the Claude share dir (default: ~/.local/share/claude).
 
+  --opencode-bin PATH
+      Host path to the 'opencode' executable (default: command -v opencode).
+
+  --opencode-share PATH
+      Host path to the OpenCode share dir (default: ~/.local/share/opencode).
+
   -h, --help
       Show help.
 
@@ -193,8 +206,11 @@ ETC_MODE=""            # empty = profile default, "full" = --full-etc, "none" = 
 WITH_GITCONFIG=0
 WITH_SSH=0
 
+TOOL=""                # empty = auto-detect, "claude" or "opencode"
 CLAUDE_BIN="$(command -v claude || true)"
 CLAUDE_SHARE="${HOME}/.local/share/claude"
+OPENCODE_BIN="$(command -v opencode || true)"
+OPENCODE_SHARE="${HOME}/.local/share/opencode"
 
 # Bind mount arrays
 BIND_RO_LIST=()
@@ -214,6 +230,7 @@ while [[ $# -gt 0 ]]; do
     --mask-env)         MASK_ENV=1; shift;;
     --mask-secrets)     MASK_SECRETS=1; shift;;
     --shell)            SHELL_MODE=1; shift;;
+    --tool)             TOOL="${2:-}"; shift 2;;
     --ro-repo)          RO_REPO_FLAG=1; shift;;
     --rw-repo)          RO_REPO_FLAG=0; shift;;
     --ephemeral-home)   EPHEMERAL_HOME_FLAG=1; shift;;
@@ -226,6 +243,8 @@ while [[ $# -gt 0 ]]; do
     --bind-rw)          BIND_RW_LIST+=("${2:-}"); shift 2;;
     --claude-bin)       CLAUDE_BIN="${2:-}"; shift 2;;
     --claude-share)     CLAUDE_SHARE="${2:-}"; shift 2;;
+    --opencode-bin)     OPENCODE_BIN="${2:-}"; shift 2;;
+    --opencode-share)   OPENCODE_SHARE="${2:-}"; shift 2;;
     -h|--help)          usage; exit 0;;
     --) shift; SEEN_DASHDASH=1; CMD_AFTER_DASHDASH=("$@"); break;;
     -*) die "Unknown option: $1";;
@@ -249,6 +268,24 @@ case "$PROFILE" in
   balanced|strict|compat) ;;
   *) die "Invalid --profile: $PROFILE (must be: balanced, strict, or compat)" ;;
 esac
+
+# Validate and auto-detect tool
+if [[ -n "$TOOL" ]]; then
+  case "$TOOL" in
+    claude|opencode) ;;
+    *) die "Invalid --tool: $TOOL (must be: claude or opencode)" ;;
+  esac
+else
+  # Auto-detect: prefer claude, fallback to opencode
+  if [[ -n "$CLAUDE_BIN" ]]; then
+    TOOL="claude"
+  elif [[ -n "$OPENCODE_BIN" ]]; then
+    TOOL="opencode"
+  else
+    # Will be checked later if we actually need a coding assistant
+    TOOL=""
+  fi
+fi
 
 # Apply profile defaults (only if flags not explicitly set)
 case "$PROFILE" in
@@ -300,26 +337,49 @@ if [[ "$SANDBOX_REPO" == /home/* ]]; then
   die "Repo cannot be mounted under /home (conflicts with sandbox HOME at /home/\$USER)"
 fi
 
-# Claude paths (host) — only needed if we are actually going to launch Claude.
+# Coding assistant paths (host) — only needed if we are actually going to launch one.
 # If the user uses:  clavinculis <repo> -- <command>
-# then we should NOT require Claude to be installed.
-NEED_CLAUDE=1
+# then we should NOT require a coding assistant to be installed.
+NEED_TOOL=1
 if [[ "$SHELL_MODE" -eq 1 ]]; then
-  NEED_CLAUDE=0
+  NEED_TOOL=0
 elif [[ "$SEEN_DASHDASH" -eq 1 && ${#CMD_AFTER_DASHDASH[@]} -gt 0 && "${CMD_AFTER_DASHDASH[0]}" != -* ]]; then
-  NEED_CLAUDE=0
+  NEED_TOOL=0
 fi
 
-if [[ "$NEED_CLAUDE" -eq 1 ]]; then
-  [[ -n "$CLAUDE_BIN" ]] || die "claude not found in PATH (use --claude-bin)"
-  CLAUDE_BIN_REAL="$(readlink -f "$CLAUDE_BIN" || true)"
-  [[ -x "$CLAUDE_BIN_REAL" ]] || die "Missing/invalid claude bin: $CLAUDE_BIN_REAL"
-  [[ -d "$CLAUDE_SHARE" ]] || die "Missing claude share dir: $CLAUDE_SHARE (use --claude-share)"
+if [[ "$NEED_TOOL" -eq 1 ]]; then
+  [[ -n "$TOOL" ]] || die "No coding assistant found in PATH. Install claude or opencode, or use --tool/--claude-bin/--opencode-bin"
+
+  if [[ "$TOOL" == "claude" ]]; then
+    [[ -n "$CLAUDE_BIN" ]] || die "claude not found in PATH (use --claude-bin)"
+    TOOL_BIN_REAL="$(readlink -f "$CLAUDE_BIN" || true)"
+    [[ -x "$TOOL_BIN_REAL" ]] || die "Missing/invalid claude bin: $TOOL_BIN_REAL"
+    [[ -d "$CLAUDE_SHARE" ]] || die "Missing claude share dir: $CLAUDE_SHARE (use --claude-share)"
+    TOOL_SHARE="$CLAUDE_SHARE"
+    TOOL_NAME="claude"
+  elif [[ "$TOOL" == "opencode" ]]; then
+    [[ -n "$OPENCODE_BIN" ]] || die "opencode not found in PATH (use --opencode-bin)"
+    TOOL_BIN_REAL="$(readlink -f "$OPENCODE_BIN" || true)"
+    [[ -x "$TOOL_BIN_REAL" ]] || die "Missing/invalid opencode bin: $TOOL_BIN_REAL"
+    [[ -d "$OPENCODE_SHARE" ]] || die "Missing opencode share dir: $OPENCODE_SHARE (use --opencode-share)"
+    TOOL_SHARE="$OPENCODE_SHARE"
+    TOOL_NAME="opencode"
+  fi
 else
-  CLAUDE_BIN_REAL=""
+  TOOL_BIN_REAL=""
+  TOOL_SHARE=""
+  TOOL_NAME=""
 fi
 
 # Per-sandbox state dirs on host (persistent mode / masking placeholders)
+# Use tool-specific base directory if not explicitly set
+if [[ "$NEED_TOOL" -eq 1 && "$STATE_BASE" == "${HOME}/.claude-sandboxes" ]]; then
+  # Default STATE_BASE and we need a tool - use tool-specific directory
+  if [[ "$TOOL" == "opencode" ]]; then
+    STATE_BASE="${HOME}/.opencode-sandboxes"
+  fi
+  # claude keeps using ~/.claude-sandboxes (default)
+fi
 SANDBOX_STATE="${STATE_BASE%/}/${NAME}"
 PERSIST_HOME="${SANDBOX_STATE}/home"
 
@@ -334,7 +394,11 @@ fi
 
 # Persistent HOME directory (only when not ephemeral)
 if [[ "$EPHEMERAL_HOME" -eq 0 ]]; then
-  mkdir -p "$PERSIST_HOME"/{.config,.cache,.local/bin,.local/share,.claude}
+  mkdir -p "$PERSIST_HOME"/{.config,.cache,.local/bin,.local/share}
+  # Create tool-specific directories
+  if [[ "$TOOL" == "claude" ]]; then
+    mkdir -p "$PERSIST_HOME/.claude"
+  fi
 fi
 
 # Synthetic /etc directory (used by synthetic and balanced modes)
@@ -645,15 +709,21 @@ else
   BWRAP_ARGS+=( --bind "$PERSIST_HOME" "/home/$USER_NAME" )
 fi
 
-# If we're actually going to run Claude, provide Claude install inside sandbox HOME (read-only)
-if [[ "$NEED_CLAUDE" -eq 1 ]]; then
+# If we're actually going to run a coding assistant, provide its install inside sandbox HOME
+if [[ "$NEED_TOOL" -eq 1 ]]; then
   BWRAP_ARGS+=(
     --dir "/home/$USER_NAME/.local"
     --dir "/home/$USER_NAME/.local/bin"
     --dir "/home/$USER_NAME/.local/share"
-    --ro-bind "$CLAUDE_BIN_REAL" "/home/$USER_NAME/.local/bin/claude"
-    --ro-bind "$CLAUDE_SHARE" "/home/$USER_NAME/.local/share/claude"
+    --ro-bind "$TOOL_BIN_REAL" "/home/$USER_NAME/.local/bin/$TOOL_NAME"
   )
+
+  # OpenCode needs write access to its share dir for logs; Claude Code doesn't
+  if [[ "$TOOL" == "opencode" ]]; then
+    BWRAP_ARGS+=( --bind "$TOOL_SHARE" "/home/$USER_NAME/.local/share/opencode" )
+  else
+    BWRAP_ARGS+=( --ro-bind "$TOOL_SHARE" "/home/$USER_NAME/.local/share/$TOOL_NAME" )
+  fi
 fi
 
 # Helper: create a directory chain inside sandbox for an absolute path
@@ -820,12 +890,12 @@ if [[ "$SHELL_MODE" -eq 1 ]]; then
 else
   if (( ${#CMD_AFTER_DASHDASH[@]} > 0 )); then
     if [[ "${CMD_AFTER_DASHDASH[0]}" == -* ]]; then
-      cmd=(/home/"$USER_NAME"/.local/bin/claude "${CMD_AFTER_DASHDASH[@]}")
+      cmd=(/home/"$USER_NAME"/.local/bin/"$TOOL_NAME" "${CMD_AFTER_DASHDASH[@]}")
     else
       cmd=("${CMD_AFTER_DASHDASH[@]}")
     fi
   else
-    cmd=(/home/"$USER_NAME"/.local/bin/claude)
+    cmd=(/home/"$USER_NAME"/.local/bin/"$TOOL_NAME")
   fi
 fi
 

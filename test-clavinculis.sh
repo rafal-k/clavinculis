@@ -2,7 +2,7 @@
 # test-clavinculis.sh - Automated test suite for Clavinculis
 #
 # Tests the clavinculis wrapper script for correctness and security isolation.
-# Does NOT require Claude Code to be installed (uses --shell mode and mock binaries).
+# Does NOT require Claude Code or OpenCode to be installed (uses --shell mode and mock binaries).
 #
 # Usage: ./test-clavinculis.sh [--verbose] [--no-color] [--skip-sudo]
 
@@ -49,7 +49,7 @@ Options:
   -h, --help       Show this help
 
 Tests the clavinculis.sh wrapper for security isolation and correctness.
-Does not require Claude Code installation (uses --shell mode).
+Does not require Claude Code or OpenCode installation (uses --shell mode and mock binaries).
 EOF
             exit 0
             ;;
@@ -114,20 +114,37 @@ ls -la 2>/dev/null | head -3
 exit 0
 EOF
     chmod +x "$TEST_DIR/mock-claude"
+
+    # Create mock OpenCode binary
+    cat > "$TEST_DIR/mock-opencode" <<'EOF'
+#!/bin/bash
+echo "MOCK_OPENCODE_STARTED"
+echo "PWD=$PWD"
+echo "HOME=$HOME"
+echo "USER=$USER"
+ls -la 2>/dev/null | head -3
+exit 0
+EOF
+    chmod +x "$TEST_DIR/mock-opencode"
 }
 
 cleanup() {
+    # Preserve exit code through cleanup (critical for set -e compatibility)
+    local exit_code=$?
+
     # Kill any background processes from this script
-    local bg_jobs=$(jobs -p)
+    local bg_jobs=$(jobs -p 2>/dev/null) || true
     if [[ -n "$bg_jobs" ]]; then
         echo "$bg_jobs" | xargs -r kill 2>/dev/null || true
         log_verbose "Cleaned up background processes"
     fi
 
     if [[ -n "$TEST_DIR" && -d "$TEST_DIR" ]]; then
-        rm -rf "$TEST_DIR"
+        rm -rf "$TEST_DIR" 2>/dev/null || true
         log_verbose "Cleaned up test directory"
     fi
+
+    return $exit_code
 }
 
 # Validation
@@ -570,6 +587,71 @@ test_mock_claude() {
     fi
 }
 
+test_opencode_support() {
+    section "OpenCode Support"
+
+    # Test explicit OpenCode tool selection
+    output=$($SCRIPT --tool opencode --opencode-bin "$TEST_DIR/mock-opencode" --opencode-share "$TEST_DIR/repo" "$TEST_DIR/repo" 2>&1 || true)
+
+    if contains "MOCK_OPENCODE_STARTED" "$output"; then
+        pass "OpenCode binary executes with --tool opencode"
+    else
+        fail "OpenCode binary does not execute"
+    fi
+
+    # Test invalid tool name
+    output=$($SCRIPT --tool invalid "$TEST_DIR/repo" 2>&1 || true)
+    if contains "Invalid --tool" "$output"; then
+        pass "Invalid tool name rejected"
+    else
+        fail "Should reject invalid tool name"
+    fi
+
+    # Test separate state directories for Claude and OpenCode
+    # Create temporary state base for isolation testing
+    local state_base="$TEST_DIR/sandboxes"
+    mkdir -p "$state_base"
+
+    # Run Claude Code (should use .claude-sandboxes)
+    output=$(run_in_shell "$TEST_DIR/repo" "echo \$HOME" --state-base "$state_base" --claude-bin "$TEST_DIR/mock-claude" --claude-share "$TEST_DIR/repo" --tool claude)
+    if [[ -d "$state_base/repo/home" ]]; then
+        pass "Claude Code uses correct state directory"
+    else
+        fail "Claude Code state directory not created correctly"
+    fi
+
+    # Run OpenCode (should use separate directory when auto-selected)
+    # First test with explicit state-base (should honor it)
+    local opencode_state="$TEST_DIR/opencode-sandboxes"
+    mkdir -p "$opencode_state"
+    output=$(run_in_shell "$TEST_DIR/repo" "echo \$HOME" --state-base "$opencode_state" --opencode-bin "$TEST_DIR/mock-opencode" --opencode-share "$TEST_DIR/repo" --tool opencode)
+    if [[ -d "$opencode_state/repo/home" ]]; then
+        pass "OpenCode honors --state-base option"
+    else
+        fail "OpenCode does not honor --state-base"
+    fi
+
+    # Test that .claude directory is NOT created in OpenCode HOME
+    rm -rf "$opencode_state"
+    mkdir -p "$opencode_state"
+    run_in_shell "$TEST_DIR/repo" "true" --state-base "$opencode_state" --opencode-bin "$TEST_DIR/mock-opencode" --opencode-share "$TEST_DIR/repo" --tool opencode >/dev/null 2>&1
+    if [[ ! -d "$opencode_state/repo/home/.claude" ]]; then
+        pass "OpenCode HOME does not contain .claude directory"
+    else
+        fail "OpenCode HOME should not have .claude directory"
+    fi
+
+    # Test that .claude directory IS created in Claude Code HOME
+    rm -rf "$state_base"
+    mkdir -p "$state_base"
+    run_in_shell "$TEST_DIR/repo" "true" --state-base "$state_base" --claude-bin "$TEST_DIR/mock-claude" --claude-share "$TEST_DIR/repo" --tool claude >/dev/null 2>&1
+    if [[ -d "$state_base/repo/home/.claude" ]]; then
+        pass "Claude Code HOME contains .claude directory"
+    else
+        fail "Claude Code HOME should have .claude directory"
+    fi
+}
+
 test_host_verification() {
     section "Host-Side Mount Verification (requires sudo)"
 
@@ -693,6 +775,7 @@ main() {
     test_options_mask_secrets
     test_options_ephemeral_home
     test_mock_claude
+    test_opencode_support
     test_host_verification
     test_edge_cases
 
