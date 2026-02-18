@@ -65,12 +65,21 @@ if ! command -v bwrap >/dev/null 2>&1; then
 fi
 echo -e "${GREEN}✓ bubblewrap installed${RESET}"
 
+HAS_CLAUDE=0
+HAS_OPENCODE=0
+
 if command -v claude >/dev/null 2>&1; then
     echo -e "${GREEN}✓ Claude Code found in PATH${RESET}"
     HAS_CLAUDE=1
-else
-    echo -e "${YELLOW}⊘ Claude Code not found (some tests will be skipped)${RESET}"
-    HAS_CLAUDE=0
+fi
+
+if command -v opencode >/dev/null 2>&1; then
+    echo -e "${GREEN}✓ OpenCode found in PATH${RESET}"
+    HAS_OPENCODE=1
+fi
+
+if [[ $HAS_CLAUDE -eq 0 && $HAS_OPENCODE -eq 0 ]]; then
+    echo -e "${YELLOW}⊘ No coding assistant found (Claude/OpenCode tests will be skipped)${RESET}"
 fi
 
 echo ""
@@ -481,46 +490,88 @@ fi
 rm -rf "$TEST_BIND_DIR"
 
 # ==============================================================================
-# TEST 6: Real Claude Code Integration (Critical if Claude installed)
+# TEST 6: Real Coding Assistant Integration (Critical if installed)
 # ==============================================================================
-section "TEST 6: Real Claude Code Integration"
+section "TEST 6: Real Coding Assistant Integration"
 
-if [[ $HAS_CLAUDE -eq 0 ]]; then
-    test_result skip "Claude Code integration" "Claude not installed"
+if [[ $HAS_CLAUDE -eq 0 && $HAS_OPENCODE -eq 0 ]]; then
+    test_result skip "Coding assistant integration" "No assistant installed"
 else
-    echo "This test will launch real Claude Code inside the sandbox."
-    echo "You'll need to interact with it to verify functionality."
-    echo ""
-    echo -e "${BOLD}Instructions:${RESET}"
-    echo "  1. Claude will start in the sandbox"
-    echo "  2. If prompted, log in to your Anthropic account"
-    echo "  3. Once Claude is ready, ask it: 'show me the first 10 lines of README.md'"
-    echo "  4. Verify Claude can read the file"
-    echo "  5. Type 'exit' or Ctrl+D to quit"
-    echo ""
-    read -p "Ready to launch Claude? (y/N) " -n 1 -r
-    echo
-
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
+    # Test Claude Code if available
+    if [[ $HAS_CLAUDE -eq 1 ]]; then
+        echo "This test will launch real Claude Code inside the sandbox."
+        echo "You'll need to interact with it to verify functionality."
         echo ""
-        echo "Launching Claude Code..."
-        echo "─────────────────────────────────────────────────────────────"
-        "$CLAVINCULIS" "$SCRIPT_DIR" || true
-        echo "─────────────────────────────────────────────────────────────"
+        echo -e "${BOLD}Instructions:${RESET}"
+        echo "  1. Claude will start in the sandbox"
+        echo "  2. If prompted, log in to your Anthropic account"
+        echo "  3. Once Claude is ready, ask it: 'show me the first 10 lines of README.md'"
+        echo "  4. Verify Claude can read the file"
+        echo "  5. Type 'exit' or Ctrl+D to quit"
+        echo ""
+        read -p "Ready to launch Claude Code? (y/N) " -n 1 -r
+        echo
 
-        if ask_user "Did Claude start successfully and respond to your query?"; then
-            test_result pass "Claude Code launches and connects"
-        else
-            test_result fail "Claude Code launches and connects"
-        fi
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            echo ""
+            echo "Launching Claude Code..."
+            echo "─────────────────────────────────────────────────────────────"
+            "$CLAVINCULIS" --tool claude "$SCRIPT_DIR" || true
+            echo "─────────────────────────────────────────────────────────────"
 
-        if ask_user "Could Claude read files from the repo?"; then
-            test_result pass "Claude can read repo files"
+            if ask_user "Did Claude start successfully and respond to your query?"; then
+                test_result pass "Claude Code launches and connects"
+            else
+                test_result fail "Claude Code launches and connects"
+            fi
+
+            if ask_user "Could Claude read files from the repo?"; then
+                test_result pass "Claude can read repo files"
+            else
+                test_result fail "Claude can read repo files"
+            fi
         else
-            test_result fail "Claude can read repo files"
+            test_result skip "Claude Code integration" "User skipped"
         fi
-    else
-        test_result skip "Claude Code integration" "User skipped"
+    fi
+
+    # Test OpenCode if available
+    if [[ $HAS_OPENCODE -eq 1 ]]; then
+        echo ""
+        echo "This test will launch real OpenCode inside the sandbox."
+        echo "You'll need to interact with it to verify functionality."
+        echo ""
+        echo -e "${BOLD}Instructions:${RESET}"
+        echo "  1. OpenCode will start in the sandbox"
+        echo "  2. If prompted, log in to your OpenAI account"
+        echo "  3. Once OpenCode is ready, ask it: 'show me the first 10 lines of README.md'"
+        echo "  4. Verify OpenCode can read the file"
+        echo "  5. Type 'exit' or Ctrl+D to quit"
+        echo ""
+        read -p "Ready to launch OpenCode? (y/N) " -n 1 -r
+        echo
+
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            echo ""
+            echo "Launching OpenCode..."
+            echo "─────────────────────────────────────────────────────────────"
+            "$CLAVINCULIS" --tool opencode "$SCRIPT_DIR" || true
+            echo "─────────────────────────────────────────────────────────────"
+
+            if ask_user "Did OpenCode start successfully and respond to your query?"; then
+                test_result pass "OpenCode launches and connects"
+            else
+                test_result fail "OpenCode launches and connects"
+            fi
+
+            if ask_user "Could OpenCode read files from the repo?"; then
+                test_result pass "OpenCode can read repo files"
+            else
+                test_result fail "OpenCode can read repo files"
+            fi
+        else
+            test_result skip "OpenCode integration" "User skipped"
+        fi
     fi
 fi
 
@@ -529,36 +580,72 @@ fi
 # ==============================================================================
 section "TEST 7: Session Persistence"
 
-if [[ $HAS_CLAUDE -eq 0 ]]; then
-    test_result skip "Session persistence" "Claude not installed"
+if [[ $HAS_CLAUDE -eq 0 && $HAS_OPENCODE -eq 0 ]]; then
+    test_result skip "Session persistence" "No assistant installed"
 else
-    echo "This test verifies that Claude's login persists across runs."
-    echo ""
-    echo -e "${BOLD}Instructions:${RESET}"
-    echo "  1. First run: Launch Claude and log in (if not already)"
-    echo "  2. Exit Claude"
-    echo "  3. Second run: Launch Claude again"
-    echo "  4. Verify you're still logged in (no re-login prompt)"
-    echo ""
-    read -p "Test session persistence? (y/N) " -n 1 -r
-    echo
-
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
+    # Test Claude Code session persistence
+    if [[ $HAS_CLAUDE -eq 1 ]]; then
+        echo "This test verifies that Claude Code's login persists across runs."
         echo ""
-        echo "First run - logging in..."
-        "$CLAVINCULIS" "$SCRIPT_DIR" || true
-
+        echo -e "${BOLD}Instructions:${RESET}"
+        echo "  1. First run: Launch Claude and log in (if not already)"
+        echo "  2. Exit Claude"
+        echo "  3. Second run: Launch Claude again"
+        echo "  4. Verify you're still logged in (no re-login prompt)"
         echo ""
-        echo "Second run - checking persistence..."
-        "$CLAVINCULIS" "$SCRIPT_DIR" || true
+        read -p "Test Claude Code session persistence? (y/N) " -n 1 -r
+        echo
 
-        if ask_user "Were you still logged in on the second run?"; then
-            test_result pass "Session persistence"
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            echo ""
+            echo "First run - logging in..."
+            "$CLAVINCULIS" --tool claude "$SCRIPT_DIR" || true
+
+            echo ""
+            echo "Second run - checking persistence..."
+            "$CLAVINCULIS" --tool claude "$SCRIPT_DIR" || true
+
+            if ask_user "Were you still logged in on the second run?"; then
+                test_result pass "Claude Code session persistence"
+            else
+                test_result fail "Claude Code session persistence" "Had to login again"
+            fi
         else
-            test_result fail "Session persistence" "Had to login again"
+            test_result skip "Claude Code session persistence" "User skipped"
         fi
-    else
-        test_result skip "Session persistence" "User skipped"
+    fi
+
+    # Test OpenCode session persistence
+    if [[ $HAS_OPENCODE -eq 1 ]]; then
+        echo ""
+        echo "This test verifies that OpenCode's login persists across runs."
+        echo ""
+        echo -e "${BOLD}Instructions:${RESET}"
+        echo "  1. First run: Launch OpenCode and log in (if not already)"
+        echo "  2. Exit OpenCode"
+        echo "  3. Second run: Launch OpenCode again"
+        echo "  4. Verify you're still logged in (no re-login prompt)"
+        echo ""
+        read -p "Test OpenCode session persistence? (y/N) " -n 1 -r
+        echo
+
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            echo ""
+            echo "First run - logging in..."
+            "$CLAVINCULIS" --tool opencode "$SCRIPT_DIR" || true
+
+            echo ""
+            echo "Second run - checking persistence..."
+            "$CLAVINCULIS" --tool opencode "$SCRIPT_DIR" || true
+
+            if ask_user "Were you still logged in on the second run?"; then
+                test_result pass "OpenCode session persistence"
+            else
+                test_result fail "OpenCode session persistence" "Had to login again"
+            fi
+        else
+            test_result skip "OpenCode session persistence" "User skipped"
+        fi
     fi
 fi
 

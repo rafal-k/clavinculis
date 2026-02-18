@@ -6,7 +6,7 @@ The goal is simple: Your coding assistant can see and modify **one repo** (and i
 
 ## Why
 
-Coding agents are powerful, but the local runtime can read files, spawn processes, and access your environment. App-level “scope” promises are helpful, but for security-sensitive work you often want **kernel-enforced isolation**:
+Coding agents are powerful, but the local runtime can read files, spawn processes, and access your environment. App-level "scope" promises are helpful, but for security-sensitive work you often want **kernel-enforced isolation**:
 
 - prevent accidental reads of `~/.ssh`, `~/.aws`, other repos, etc.
 - reduce host metadata exposure
@@ -38,7 +38,7 @@ Clavinculis **does not**:
 
 - prevent network exfiltration of data that *is* visible in the sandbox (the agent can still send repo contents to the model service)
 - provide MAC-level isolation (SELinux/AppArmor), VM-level isolation, or kernel exploit resistance
-- “sanitize” the repo itself — if secrets are in the repo, Claude can read them unless you use masking options
+- "sanitize" the repo itself — if secrets are in the repo, Claude can read them unless you use masking options
 
 What it **does** provide:
 
