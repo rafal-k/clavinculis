@@ -434,6 +434,27 @@ if [[ -u "$BWRAP_PATH" ]]; then
   BWRAP_IS_SETUID=1
 fi
 
+# Detect nvm bin path (for dynamic PATH construction)
+NVM_BIN_PATH=""
+if [[ -n "${NVM_BIN:-}" && -d "${NVM_BIN}" ]]; then
+  # Use existing $NVM_BIN from environment (already set by nvm)
+  # Convert host path to sandbox path
+  NVM_BIN_RELATIVE="${NVM_BIN#${HOME}/}"
+  NVM_BIN_PATH="/home/${USER_NAME}/${NVM_BIN_RELATIVE}"
+elif [[ -d "${HOME}/.config/nvm" ]]; then
+  # Fallback: detect from directory structure
+  NVM_VERSION=""
+  if [[ -f "${HOME}/.config/nvm/alias/default" ]]; then
+    NVM_VERSION="$(cat "${HOME}/.config/nvm/alias/default" 2>/dev/null || true)"
+  fi
+  if [[ -z "$NVM_VERSION" && -d "${HOME}/.config/nvm/versions/node" ]]; then
+    NVM_VERSION="$(ls -1 "${HOME}/.config/nvm/versions/node" 2>/dev/null | sort -V | tail -n1 || true)"
+  fi
+  if [[ -n "$NVM_VERSION" && -d "${HOME}/.config/nvm/versions/node/${NVM_VERSION}/bin" ]]; then
+    NVM_BIN_PATH="/home/${USER_NAME}/.config/nvm/versions/node/${NVM_VERSION}/bin"
+  fi
+fi
+
 # Generate synthetic /etc files (Strategy 1: fully synthetic)
 generate_synthetic_etc() {
   mkdir -p "$SYNTHETIC_ETC"
@@ -537,6 +558,12 @@ EOF
   fi
 }
 
+# Build PATH dynamically (include nvm if detected)
+SANDBOX_PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/home/$USER_NAME/.local/bin"
+if [[ -n "$NVM_BIN_PATH" ]]; then
+  SANDBOX_PATH="${SANDBOX_PATH}:${NVM_BIN_PATH}"
+fi
+
 BWRAP_ARGS=(
   --die-with-parent
   --unshare-all --unshare-user --share-net
@@ -549,7 +576,7 @@ BWRAP_ARGS=(
   --setenv HOME "/home/$USER_NAME"
   --setenv XDG_CONFIG_HOME "/home/$USER_NAME/.config"
   --setenv XDG_CACHE_HOME  "/home/$USER_NAME/.cache"
-  --setenv PATH "/usr/bin:/bin:/usr/sbin:/sbin:/home/$USER_NAME/.local/bin"
+  --setenv PATH "$SANDBOX_PATH"
   --setenv LANG "${LANG:-C.UTF-8}"
   --setenv TERM "${TERM:-xterm-256color}"
   --setenv SHELL /bin/bash
@@ -568,6 +595,11 @@ BWRAP_ARGS=(
 # Minimal runtime FS (practical userland) - continued
 # Always bind /usr (universal)
 BWRAP_ARGS+=( --ro-bind /usr /usr )
+
+# Explicitly bind /usr/local (may be separate mount point, needed for npm global packages)
+if [[ -d /usr/local ]]; then
+  BWRAP_ARGS+=( --ro-bind /usr/local /usr/local )
+fi
 
 # Handle /bin (required - all distros have this)
 if [[ -L /bin ]]; then
@@ -792,6 +824,11 @@ if [[ "$WITH_SSH" -eq 1 ]]; then
   else
     echo "WARNING: --with-ssh specified but ~/.ssh not found" >&2
   fi
+fi
+
+# Auto-mount nvm if present (required for Node.js-based tools)
+if [[ -d "${HOME}/.config/nvm" ]]; then
+  BIND_RO_LIST+=("${HOME}/.config/nvm:/home/${USER_NAME}/.config/nvm")
 fi
 
 # Strict profile: extra binds are only allowed when explicitly requested,
