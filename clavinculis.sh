@@ -826,18 +826,18 @@ if [[ "$WITH_SSH" -eq 1 ]]; then
   fi
 fi
 
-# Auto-mount nvm if present (required for Node.js-based tools)
-if [[ -d "${HOME}/.config/nvm" ]]; then
-  BIND_RO_LIST+=("${HOME}/.config/nvm:/home/${USER_NAME}/.config/nvm")
-fi
-
-# Strict profile: extra binds are only allowed when explicitly requested,
-# but they materially weaken isolation — warn loudly.
+# Strict profile: warn about user-requested extra binds (before auto-mounts)
+# Auto-mounts (like nvm) are for functionality and don't warrant a warning.
 if [[ "$PROFILE" == "strict" ]]; then
   if (( ${#BIND_RO_LIST[@]} + ${#BIND_RW_LIST[@]} > 0 )); then
     echo "WARNING: strict profile: extra bind mounts were requested; this weakens isolation." >&2
     echo "         Review --bind-ro/--bind-rw and convenience flags like --with-ssh/--with-gitconfig." >&2
   fi
+fi
+
+# Auto-mount nvm if present (required for Node.js-based tools)
+if [[ -d "${HOME}/.config/nvm" ]]; then
+  BIND_RO_LIST+=("${HOME}/.config/nvm:/home/${USER_NAME}/.config/nvm")
 fi
 
 # Process custom read-only bind mounts
