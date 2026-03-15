@@ -24,6 +24,8 @@ Clavinculis launches your coding assistant (`claude` or `opencode`) in a dedicat
   - tmpfs (ephemeral) with `--ephemeral-home`
 - a "practical minimal runtime" filesystem:
   - `/usr`, `/bin`, `/lib*`, `/proc`, `/dev`, and tmpfs `/tmp`
+  - `/dev/shm` for shared memory (required for headless browsers)
+  - Font configuration (`/etc/fonts`) for text rendering
 - **synthetic `/etc`** (strict profile, secure by default):
   - Fully generated passwd/group/hosts files (no host metadata exposed)
   - DNS (`resolv.conf`) and TLS certificates (required for Anthropic API)
@@ -31,6 +33,42 @@ Clavinculis launches your coding assistant (`claude` or `opencode`) in a dedicat
   - Use `--profile balanced` for more host compatibility, or `--profile compat` / `--full-etc` if something breaks
 
 Anything you don't mount simply does not exist from the sandbox's point of view.
+
+### Headless browser support
+
+The sandbox includes built-in support for **headless browsers** (Firefox, Chromium, Chrome):
+- Browsers run in headless mode (no GUI, no display server needed)
+- Shared memory (`/dev/shm`) is properly configured for Chromium
+- Font rendering works for screenshots, PDFs, and layout calculations
+- No additional flags required - just use browsers in headless mode
+
+**Example usage:**
+```bash
+# Firefox headless
+clavinculis /path/to/repo -- firefox --headless --screenshot=/tmp/page.png https://example.com
+
+# Chrome/Chromium headless
+clavinculis /path/to/repo -- google-chrome --headless --screenshot=/tmp/page.png https://example.com
+
+# Playwright test suite (if installed in repo)
+clavinculis /path/to/repo -- npm test
+
+# Puppeteer script
+clavinculis /path/to/repo -- node scripts/scrape-data.js
+
+# Interactive browser automation
+clavinculis /path/to/repo  # Then run browser commands from Claude Code
+```
+
+Browsers will use the sandbox HOME (`~/.cache`, `~/.local/share`) for profiles and cache, keeping host clean.
+
+**Note:** Display-based GUI browsers are not supported (no X11/Wayland). For web testing and automation, use headless mode.
+
+**Quick test:**
+```bash
+./test-browser.sh /path/to/repo
+```
+This script verifies that headless browsers work correctly in the sandbox by taking a screenshot of example.com.
 
 ## Non-goals / threat model boundaries
 
@@ -306,6 +344,7 @@ Results from a typical run: 36 tests passed, 6 skipped (sudo-only tests and envi
 
 ## Notes and caveats
 
+- **Headless browsers:** Firefox, Chromium, and Chrome work in headless mode out of the box. Shared memory (`/dev/shm`), fonts, and machine-id are properly configured. Nested sandboxing is allowed, so browsers can create their own internal sandbox without conflicts. GUI browsers (with display) are not supported as X11/Wayland are not mounted.
 - **Git & SSH:** By default, your `~/.ssh` is not mounted, so git-over-SSH from inside the sandbox will not work unless you use `--with-ssh` and `--with-gitconfig`. Many users prefer to keep git operations outside the agent for safety and reviewability.
 - **Networking:** The sandbox shares the network namespace so the coding assistant can function. If you want an "offline review shell", use `--shell` and modify the script to unshare net (out of scope for default operation).
 - **Compatibility:** Default strict profile (synthetic `/etc`) works perfectly for Claude Code and OpenCode. If something breaks, use `--profile balanced` or `--profile compat` / `--full-etc` for more host compatibility (at the cost of exposing host metadata).

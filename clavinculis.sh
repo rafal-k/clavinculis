@@ -169,6 +169,13 @@ EXAMPLES
   # Custom bind mounts
   clavinculis --bind-ro /host/data:/work/external-data /path/to/repo
 
+  # Headless browser testing
+  clavinculis /path/to/repo -- firefox --headless --screenshot=/tmp/test.png https://example.com
+  clavinculis /path/to/repo -- google-chrome --headless --screenshot=/tmp/test.png https://example.com
+
+  # Run browser automation tests
+  clavinculis /path/to/repo -- npm test
+
 COMMON RECIPES
   # Enable git with SSH
   clavinculis --with-gitconfig --with-ssh /path/to/repo
@@ -428,12 +435,6 @@ UID_NUM="$(id -u)"
 GID_NUM="$(id -g)"
 USER_NAME="${USER:-$(id -un)}"
 
-# Detect setuid bubblewrap (--disable-userns does not work there)
-BWRAP_IS_SETUID=0
-if [[ -u "$BWRAP_PATH" ]]; then
-  BWRAP_IS_SETUID=1
-fi
-
 # Detect nvm bin path (for dynamic PATH construction)
 NVM_BIN_PATH=""
 if [[ -n "${NVM_BIN:-}" && -d "${NVM_BIN}" ]]; then
@@ -511,6 +512,10 @@ EOF
   # /etc/hostname
   echo "sandbox-${NAME}" > "$SYNTHETIC_ETC/hostname"
 
+  # /etc/machine-id - needed by D-Bus, systemd, browsers
+  # Generate a deterministic but unique ID based on sandbox name
+  echo "${NAME}" | md5sum | awk '{print $1}' > "$SYNTHETIC_ETC/machine-id"
+
   # /etc/protocols - prefer host copy for compatibility, fallback to a small baseline
   if [[ -r /etc/protocols ]]; then
     cp /etc/protocols "$SYNTHETIC_ETC/protocols"
@@ -558,8 +563,14 @@ EOF
   fi
 }
 
-# Build PATH dynamically (include nvm if detected)
+# Build PATH dynamically (include nvm and /opt apps if detected)
 SANDBOX_PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/home/$USER_NAME/.local/bin"
+
+# Add common /opt paths for third-party software (Chrome, etc.)
+if [[ -d /opt/google/chrome ]]; then
+  SANDBOX_PATH="${SANDBOX_PATH}:/opt/google/chrome"
+fi
+
 if [[ -n "$NVM_BIN_PATH" ]]; then
   SANDBOX_PATH="${SANDBOX_PATH}:${NVM_BIN_PATH}"
 fi
@@ -601,6 +612,11 @@ if [[ -d /usr/local ]]; then
   BWRAP_ARGS+=( --ro-bind /usr/local /usr/local )
 fi
 
+# Bind /opt (Chrome, other third-party software)
+if [[ -d /opt ]]; then
+  BWRAP_ARGS+=( --ro-bind /opt /opt )
+fi
+
 # Handle /bin (required - all distros have this)
 if [[ -L /bin ]]; then
   # Modern merged-/usr: /bin is a symlink
@@ -640,11 +656,6 @@ elif [[ -d /lib64 ]]; then
   BWRAP_ARGS+=( --ro-bind /lib64 /lib64 )
 fi
 
-# Reduce namespace escape surface when possible.
-# NOTE: --disable-userns does not work with the setuid bubblewrap build.
-if [[ "$BWRAP_IS_SETUID" -eq 0 ]]; then
-  BWRAP_ARGS+=( --disable-userns )
-fi
 
 # Preserve common connectivity env vars (helps corporate proxies / custom CAs).
 for v in HTTPS_PROXY https_proxy HTTP_PROXY http_proxy NO_PROXY no_proxy \
@@ -681,12 +692,17 @@ case "$ETC_MODE" in
       --ro-bind "$SYNTHETIC_ETC/hosts" /etc/hosts
       --ro-bind "$SYNTHETIC_ETC/hostname" /etc/hostname
       --ro-bind "$SYNTHETIC_ETC/resolv.conf" /etc/resolv.conf
+      --ro-bind "$SYNTHETIC_ETC/machine-id" /etc/machine-id
       --dir /etc/ssl/certs
     )
     # TLS trust + OpenSSL config
     BWRAP_ARGS+=( --ro-bind-try /etc/ssl/certs /etc/ssl/certs )
     BWRAP_ARGS+=( --ro-bind-try /etc/ca-certificates.conf /etc/ca-certificates.conf )
     BWRAP_ARGS+=( --ro-bind-try /etc/ssl/openssl.cnf /etc/ssl/openssl.cnf )
+    # Font config (for headless browsers, PDF generation, rendering)
+    BWRAP_ARGS+=( --ro-bind-try /etc/fonts /etc/fonts )
+    # Debian alternatives system (for browser symlinks like google-chrome)
+    BWRAP_ARGS+=( --ro-bind-try /etc/alternatives /etc/alternatives )
     ;;
 
   balanced)
@@ -711,6 +727,7 @@ case "$ETC_MODE" in
       BWRAP_ARGS+=( --ro-bind "$SYNTHETIC_ETC/hosts" /etc/hosts )
       BWRAP_ARGS+=( --ro-bind "$SYNTHETIC_ETC/hostname" /etc/hostname )
       BWRAP_ARGS+=( --ro-bind "$SYNTHETIC_ETC/resolv.conf" /etc/resolv.conf )
+      BWRAP_ARGS+=( --ro-bind "$SYNTHETIC_ETC/machine-id" /etc/machine-id )
     else
       # Host has standard files - bind them (exposes local account list)
       BWRAP_ARGS+=( --ro-bind /etc/passwd /etc/passwd )
@@ -725,12 +742,25 @@ case "$ETC_MODE" in
       BWRAP_ARGS+=( --ro-bind-try /etc/hostname /etc/hostname )
       BWRAP_ARGS+=( --ro-bind-try /etc/localtime /etc/localtime )
       BWRAP_ARGS+=( --ro-bind "$RESOLV_SRC" /etc/resolv.conf )
+      # Machine-id: try host first, fall back to synthetic
+      if [[ -f /etc/machine-id ]]; then
+        BWRAP_ARGS+=( --ro-bind /etc/machine-id /etc/machine-id )
+      elif [[ -f /var/lib/dbus/machine-id ]]; then
+        BWRAP_ARGS+=( --ro-bind /var/lib/dbus/machine-id /etc/machine-id )
+      else
+        generate_synthetic_etc  # Ensure synthetic machine-id exists
+        BWRAP_ARGS+=( --ro-bind "$SYNTHETIC_ETC/machine-id" /etc/machine-id )
+      fi
     fi
 
     # TLS trust + OpenSSL config
     BWRAP_ARGS+=( --ro-bind-try /etc/ssl/certs /etc/ssl/certs )
     BWRAP_ARGS+=( --ro-bind-try /etc/ca-certificates.conf /etc/ca-certificates.conf )
     BWRAP_ARGS+=( --ro-bind-try /etc/ssl/openssl.cnf /etc/ssl/openssl.cnf )
+    # Font config (for headless browsers, PDF generation, rendering)
+    BWRAP_ARGS+=( --ro-bind-try /etc/fonts /etc/fonts )
+    # Debian alternatives system (for browser symlinks like google-chrome)
+    BWRAP_ARGS+=( --ro-bind-try /etc/alternatives /etc/alternatives )
     ;;
 esac
 
