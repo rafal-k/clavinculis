@@ -78,15 +78,22 @@ OPTIONS
   --
       End of clavinculis options.
 
-      - If followed by options starting with '-', they are treated as arguments to Claude.
+      - If followed by options starting with '-', they are treated as arguments to the
+        coding assistant.
         Example: clavinculis /path/to/repo -- --help
 
-      - Otherwise, the remaining words are treated as a command to run inside the sandbox.
-        Example: clavinculis /path/to/repo -- /bin/bash
+      - If the first word is not found as an executable, it is treated as a subcommand
+        of the coding assistant.
+        Example: clavinculis /path/to/repo -- mcp add my-server
+        Example: clavinculis /path/to/repo -- config set theme dark
 
-      IMPORTANT: This runs the command INSIDE THE SANDBOX with the same isolation as Claude.
-      It does not bypass or escape sandbox restrictions. Useful for debugging or running
-      other tools in the sandboxed environment.
+      - If the first word IS an executable, it is run as a standalone command inside
+        the sandbox.
+        Example: clavinculis /path/to/repo -- /bin/bash
+        Example: clavinculis /path/to/repo -- npm test
+
+      IMPORTANT: Commands run INSIDE THE SANDBOX with the same isolation as the coding
+      assistant. They do not bypass or escape sandbox restrictions.
 
   --ro-repo
       Mount the repo READ-ONLY inside the sandbox.
@@ -345,13 +352,16 @@ if [[ "$SANDBOX_REPO" == /home/* ]]; then
 fi
 
 # Coding assistant paths (host) — only needed if we are actually going to launch one.
-# If the user uses:  clavinculis <repo> -- <command>
+# If the user uses:  clavinculis <repo> -- <command>  (where <command> is an executable)
 # then we should NOT require a coding assistant to be installed.
+# But if the first word is not an executable (e.g. "mcp add"), it's a tool subcommand.
 NEED_TOOL=1
 if [[ "$SHELL_MODE" -eq 1 ]]; then
   NEED_TOOL=0
 elif [[ "$SEEN_DASHDASH" -eq 1 && ${#CMD_AFTER_DASHDASH[@]} -gt 0 && "${CMD_AFTER_DASHDASH[0]}" != -* ]]; then
-  NEED_TOOL=0
+  if command -v "${CMD_AFTER_DASHDASH[0]}" &>/dev/null; then
+    NEED_TOOL=0
+  fi
 fi
 
 if [[ "$NEED_TOOL" -eq 1 ]]; then
@@ -956,9 +966,11 @@ if [[ "$SHELL_MODE" -eq 1 ]]; then
   cmd=(/bin/bash -i)
 else
   if (( ${#CMD_AFTER_DASHDASH[@]} > 0 )); then
-    if [[ "${CMD_AFTER_DASHDASH[0]}" == -* ]]; then
+    if [[ "${CMD_AFTER_DASHDASH[0]}" == -* ]] || ! command -v "${CMD_AFTER_DASHDASH[0]}" &>/dev/null; then
+      # Starts with '-' (flags) or first word is not an executable → treat as tool subcommand/args
       cmd=(/home/"$USER_NAME"/.local/bin/"$TOOL_NAME" "${CMD_AFTER_DASHDASH[@]}")
     else
+      # First word is an executable → run as raw command
       cmd=("${CMD_AFTER_DASHDASH[@]}")
     fi
   else
