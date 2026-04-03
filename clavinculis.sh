@@ -5,10 +5,10 @@ umask 077
 
 usage() {
   cat <<'EOF'
-clavinculis — run Claude Code or OpenCode with hard "project-only visibility" via bubblewrap.
+clavinculis — run Claude Code, OpenCode, or Codex CLI with hard "project-only visibility" via bubblewrap.
 
 OVERVIEW
-  Launches Claude Code or OpenCode inside a dedicated Linux mount namespace (bubblewrap).
+  Launches Claude Code, OpenCode, or Codex CLI inside a dedicated Linux mount namespace (bubblewrap).
   Only the repo you pass in is mounted into the sandbox (at /work/<name> by default),
   plus a minimal runtime filesystem (/usr, /bin, /lib*, /proc, /dev, /tmp).
   Your real $HOME is NOT mounted. Instead, the coding assistant gets a sandbox HOME.
@@ -22,12 +22,13 @@ SECURITY PROFILES
       - HOME: persistent sandbox HOME (use --ephemeral-home for tmpfs)
               Claude: ~/.claude-sandboxes/<name>/home
               OpenCode: ~/.opencode-sandboxes/<name>/home
+              Codex: ~/.codex-sandboxes/<name>/home
       - Network: enabled (required for API access)
       - SSH/Git: not mounted (use --with-ssh / --with-gitconfig if needed)
       - Extra binds: none unless explicitly requested with --bind-ro/--bind-rw
             (strict prints a warning)
 
-      Best default for LLM clients: minimal host visibility, still usable.
+      Best default for coding agents: minimal host visibility, still usable.
 
   --profile balanced (compat-friendly)
       - Project: mounted read-write
@@ -63,6 +64,7 @@ OPTIONS
       Host path where per-sandbox state is stored.
       Default: ~/.claude-sandboxes (for Claude Code)
               ~/.opencode-sandboxes (for OpenCode)
+              ~/.codex-sandboxes (for Codex CLI)
       Persistent sandbox HOME will be: <state-base>/<name>/home
 
   --profile balanced|strict|compat
@@ -71,9 +73,9 @@ OPTIONS
   --shell
       Instead of launching the coding assistant, start an interactive /bin/bash inside the sandbox.
 
-  --tool claude|opencode
+  --tool claude|opencode|codex
       Select which coding assistant to use (default: auto-detect).
-      Auto-detection checks for 'claude' first, then 'opencode'.
+      Auto-detection checks for 'claude' first, then 'opencode', then 'codex'.
 
   --
       End of clavinculis options.
@@ -154,6 +156,9 @@ OPTIONS
   --opencode-share PATH
       Host path to the OpenCode share dir (default: ~/.local/share/opencode).
 
+  --codex-bin PATH
+      Host path to the 'codex' executable (default: command -v codex).
+
   -h, --help
       Show help.
 
@@ -220,11 +225,24 @@ ETC_MODE=""            # empty = profile default, "full" = --full-etc, "none" = 
 WITH_GITCONFIG=0
 WITH_SSH=0
 
-TOOL=""                # empty = auto-detect, "claude" or "opencode"
+TOOL=""                # empty = auto-detect, "claude", "opencode", or "codex"
 CLAUDE_BIN="$(command -v claude || true)"
 CLAUDE_SHARE="${HOME}/.local/share/claude"
 OPENCODE_BIN="$(command -v opencode || true)"
 OPENCODE_SHARE="${HOME}/.local/share/opencode"
+CODEX_BIN="$(command -v codex || true)"
+CODEX_BIN_REAL=""      # Canonicalized codex executable path
+CODEX_RUNTIME_HOST=""  # Extra host path to mount for custom codex installs
+CODEX_RUNTIME_SANDBOX="/tmp/.clavinculis-codex-runtime"
+# Fallback: if codex not found via PATH, check nvm directories
+if [[ -z "$CODEX_BIN" && -d "${HOME}/.config/nvm/versions/node" ]]; then
+  for _ndir in "${HOME}"/.config/nvm/versions/node/*/bin; do
+    if [[ -x "${_ndir}/codex" ]]; then
+      CODEX_BIN="${_ndir}/codex"
+    fi
+  done
+  unset _ndir
+fi
 
 # Bind mount arrays
 BIND_RO_LIST=()
@@ -259,6 +277,7 @@ while [[ $# -gt 0 ]]; do
     --claude-share)     CLAUDE_SHARE="${2:-}"; shift 2;;
     --opencode-bin)     OPENCODE_BIN="${2:-}"; shift 2;;
     --opencode-share)   OPENCODE_SHARE="${2:-}"; shift 2;;
+    --codex-bin)        CODEX_BIN="${2:-}"; shift 2;;
     -h|--help)          usage; exit 0;;
     --) shift; SEEN_DASHDASH=1; CMD_AFTER_DASHDASH=("$@"); break;;
     -*) die "Unknown option: $1";;
@@ -286,15 +305,17 @@ esac
 # Validate and auto-detect tool
 if [[ -n "$TOOL" ]]; then
   case "$TOOL" in
-    claude|opencode) ;;
-    *) die "Invalid --tool: $TOOL (must be: claude or opencode)" ;;
+    claude|opencode|codex) ;;
+    *) die "Invalid --tool: $TOOL (must be: claude, opencode, or codex)" ;;
   esac
 else
-  # Auto-detect: prefer claude, fallback to opencode
+  # Auto-detect: prefer claude, then opencode, then codex
   if [[ -n "$CLAUDE_BIN" ]]; then
     TOOL="claude"
   elif [[ -n "$OPENCODE_BIN" ]]; then
     TOOL="opencode"
+  elif [[ -n "$CODEX_BIN" ]]; then
+    TOOL="codex"
   else
     # Will be checked later if we actually need a coding assistant
     TOOL=""
@@ -365,7 +386,7 @@ elif [[ "$SEEN_DASHDASH" -eq 1 && ${#CMD_AFTER_DASHDASH[@]} -gt 0 && "${CMD_AFTE
 fi
 
 if [[ "$NEED_TOOL" -eq 1 ]]; then
-  [[ -n "$TOOL" ]] || die "No coding assistant found in PATH. Install claude or opencode, or use --tool/--claude-bin/--opencode-bin"
+  [[ -n "$TOOL" ]] || die "No coding assistant found in PATH. Install claude, opencode, or codex, or use --tool/--claude-bin/--opencode-bin/--codex-bin"
 
   if [[ "$TOOL" == "claude" ]]; then
     [[ -n "$CLAUDE_BIN" ]] || die "claude not found in PATH (use --claude-bin)"
@@ -381,6 +402,24 @@ if [[ "$NEED_TOOL" -eq 1 ]]; then
     [[ -d "$OPENCODE_SHARE" ]] || die "Missing opencode share dir: $OPENCODE_SHARE (use --opencode-share)"
     TOOL_SHARE="$OPENCODE_SHARE"
     TOOL_NAME="opencode"
+  elif [[ "$TOOL" == "codex" ]]; then
+    [[ -n "$CODEX_BIN" ]] || die "codex not found in PATH (use --codex-bin)"
+    CODEX_BIN_REAL="$(readlink -f "$CODEX_BIN" || true)"
+    [[ -n "$CODEX_BIN_REAL" && -x "$CODEX_BIN_REAL" ]] || die "codex binary not executable: $CODEX_BIN"
+    # Codex is a Node.js package with native deps (@openai/codex-linux-x64).
+    # It must run from its installed location so Node.js module resolution works.
+    # Existing mounts (nvm auto-mount, /usr, /usr/local) already provide it.
+    # For custom install locations, auto-mount the runtime tree.
+    if [[ "$CODEX_BIN_REAL" != /usr/* && "$CODEX_BIN_REAL" != /usr/local/* && "$CODEX_BIN_REAL" != /opt/* && "$CODEX_BIN_REAL" != "${HOME}/.config/nvm/"* ]]; then
+      CODEX_RUNTIME_HOST="$(dirname "$CODEX_BIN_REAL")"
+      if [[ "$CODEX_BIN_REAL" == */@openai/codex/bin/codex.js ]]; then
+        CODEX_RUNTIME_HOST="${CODEX_BIN_REAL%/bin/codex.js}"
+      fi
+      [[ -d "$CODEX_RUNTIME_HOST" ]] || die "Invalid codex runtime path: $CODEX_RUNTIME_HOST"
+    fi
+    TOOL_BIN_REAL=""   # Don't extract and mount as a single file
+    TOOL_SHARE=""      # No share directory
+    TOOL_NAME="codex"
   fi
 else
   TOOL_BIN_REAL=""
@@ -394,6 +433,8 @@ if [[ "$NEED_TOOL" -eq 1 && "$STATE_BASE" == "${HOME}/.claude-sandboxes" ]]; the
   # Default STATE_BASE and we need a tool - use tool-specific directory
   if [[ "$TOOL" == "opencode" ]]; then
     STATE_BASE="${HOME}/.opencode-sandboxes"
+  elif [[ "$TOOL" == "codex" ]]; then
+    STATE_BASE="${HOME}/.codex-sandboxes"
   fi
   # claude keeps using ~/.claude-sandboxes (default)
 fi
@@ -415,6 +456,8 @@ if [[ "$EPHEMERAL_HOME" -eq 0 ]]; then
   # Create tool-specific directories
   if [[ "$TOOL" == "claude" ]]; then
     mkdir -p "$PERSIST_HOME/.claude"
+  elif [[ "$TOOL" == "codex" ]]; then
+    mkdir -p "$PERSIST_HOME/.codex"
   fi
 fi
 
@@ -444,6 +487,27 @@ fi
 UID_NUM="$(id -u)"
 GID_NUM="$(id -g)"
 USER_NAME="${USER:-$(id -un)}"
+
+# Compute sandbox path for tool binary (deferred until USER_NAME is available)
+if [[ "$NEED_TOOL" -eq 1 ]]; then
+  if [[ "$TOOL" == "codex" ]]; then
+    # Codex is a Node.js package with native deps (@openai/codex-linux-x64).
+    # It must run from its installed location so Node.js module resolution works.
+    # Existing mounts (nvm auto-mount, /usr, /usr/local) usually provide it.
+    if [[ -n "$CODEX_RUNTIME_HOST" ]]; then
+      CODEX_BIN_REL="${CODEX_BIN_REAL#${CODEX_RUNTIME_HOST}/}"
+      TOOL_SANDBOX_BIN="${CODEX_RUNTIME_SANDBOX}/${CODEX_BIN_REL}"
+    elif [[ "$CODEX_BIN_REAL" == "$HOME"/* ]]; then
+      TOOL_SANDBOX_BIN="/home/$USER_NAME/${CODEX_BIN_REAL#$HOME/}"
+    else
+      TOOL_SANDBOX_BIN="$CODEX_BIN_REAL"  # System path, same in sandbox
+    fi
+  else
+    TOOL_SANDBOX_BIN="/home/$USER_NAME/.local/bin/$TOOL_NAME"
+  fi
+else
+  TOOL_SANDBOX_BIN=""
+fi
 
 # Detect nvm bin path (for dynamic PATH construction)
 NVM_BIN_PATH=""
@@ -669,7 +733,8 @@ fi
 
 # Preserve common connectivity env vars (helps corporate proxies / custom CAs).
 for v in HTTPS_PROXY https_proxy HTTP_PROXY http_proxy NO_PROXY no_proxy \
-         SSL_CERT_FILE SSL_CERT_DIR REQUESTS_CA_BUNDLE CURL_CA_BUNDLE NODE_EXTRA_CA_CERTS; do
+         SSL_CERT_FILE SSL_CERT_DIR REQUESTS_CA_BUNDLE CURL_CA_BUNDLE NODE_EXTRA_CA_CERTS \
+         CODEX_HOME CODEX_CA_CERTIFICATE; do
   if [[ -n "${!v:-}" ]]; then
     BWRAP_ARGS+=( --setenv "$v" "${!v}" )
   fi
@@ -787,14 +852,22 @@ if [[ "$NEED_TOOL" -eq 1 ]]; then
     --dir "/home/$USER_NAME/.local"
     --dir "/home/$USER_NAME/.local/bin"
     --dir "/home/$USER_NAME/.local/share"
-    --ro-bind "$TOOL_BIN_REAL" "/home/$USER_NAME/.local/bin/$TOOL_NAME"
   )
 
-  # OpenCode needs write access to its share dir for logs; Claude Code doesn't
-  if [[ "$TOOL" == "opencode" ]]; then
-    BWRAP_ARGS+=( --bind "$TOOL_SHARE" "/home/$USER_NAME/.local/share/opencode" )
-  else
-    BWRAP_ARGS+=( --ro-bind "$TOOL_SHARE" "/home/$USER_NAME/.local/share/$TOOL_NAME" )
+  # Mount tool binary at ~/.local/bin (skip for tools already accessible via
+  # existing mounts, e.g. codex via nvm auto-mount, /usr, or runtime auto-mount)
+  if [[ -n "$TOOL_BIN_REAL" ]]; then
+    BWRAP_ARGS+=( --ro-bind "$TOOL_BIN_REAL" "/home/$USER_NAME/.local/bin/$TOOL_NAME" )
+  fi
+
+  # Mount share dir if the tool has one (Codex is self-contained, no share dir)
+  if [[ -n "$TOOL_SHARE" ]]; then
+    # OpenCode needs write access to its share dir for logs; Claude Code doesn't
+    if [[ "$TOOL" == "opencode" ]]; then
+      BWRAP_ARGS+=( --bind "$TOOL_SHARE" "/home/$USER_NAME/.local/share/opencode" )
+    else
+      BWRAP_ARGS+=( --ro-bind "$TOOL_SHARE" "/home/$USER_NAME/.local/share/$TOOL_NAME" )
+    fi
   fi
 fi
 
@@ -878,6 +951,11 @@ fi
 # Auto-mount nvm if present (required for Node.js-based tools)
 if [[ -d "${HOME}/.config/nvm" ]]; then
   BIND_RO_LIST+=("${HOME}/.config/nvm:/home/${USER_NAME}/.config/nvm")
+fi
+
+# Auto-mount custom codex runtime roots outside standard mount locations.
+if [[ -n "$CODEX_RUNTIME_HOST" ]]; then
+  BIND_RO_LIST+=("${CODEX_RUNTIME_HOST}:${CODEX_RUNTIME_SANDBOX}")
 fi
 
 # Process custom read-only bind mounts
@@ -968,13 +1046,13 @@ else
   if (( ${#CMD_AFTER_DASHDASH[@]} > 0 )); then
     if [[ "${CMD_AFTER_DASHDASH[0]}" == -* ]] || ! command -v "${CMD_AFTER_DASHDASH[0]}" &>/dev/null; then
       # Starts with '-' (flags) or first word is not an executable → treat as tool subcommand/args
-      cmd=(/home/"$USER_NAME"/.local/bin/"$TOOL_NAME" "${CMD_AFTER_DASHDASH[@]}")
+      cmd=("$TOOL_SANDBOX_BIN" "${CMD_AFTER_DASHDASH[@]}")
     else
       # First word is an executable → run as raw command
       cmd=("${CMD_AFTER_DASHDASH[@]}")
     fi
   else
-    cmd=(/home/"$USER_NAME"/.local/bin/"$TOOL_NAME")
+    cmd=("$TOOL_SANDBOX_BIN")
   fi
 fi
 

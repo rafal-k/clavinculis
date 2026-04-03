@@ -2,7 +2,7 @@
 # test-clavinculis.sh - Automated test suite for Clavinculis
 #
 # Tests the clavinculis wrapper script for correctness and security isolation.
-# Does NOT require Claude Code or OpenCode to be installed (uses --shell mode and mock binaries).
+# Does NOT require Claude Code, OpenCode, or Codex to be installed (uses --shell mode and mock binaries).
 #
 # Usage: ./test-clavinculis.sh [--verbose] [--no-color] [--skip-sudo]
 
@@ -49,7 +49,7 @@ Options:
   -h, --help       Show this help
 
 Tests the clavinculis.sh wrapper for security isolation and correctness.
-Does not require Claude Code or OpenCode installation (uses --shell mode and mock binaries).
+Does not require Claude Code, OpenCode, or Codex installation (uses --shell mode and mock binaries).
 EOF
             exit 0
             ;;
@@ -126,6 +126,18 @@ ls -la 2>/dev/null | head -3
 exit 0
 EOF
     chmod +x "$TEST_DIR/mock-opencode"
+
+    # Create mock Codex binary
+    cat > "$TEST_DIR/mock-codex" <<'EOF'
+#!/bin/bash
+echo "MOCK_CODEX_STARTED"
+echo "PWD=$PWD"
+echo "HOME=$HOME"
+echo "USER=$USER"
+ls -la 2>/dev/null | head -3
+exit 0
+EOF
+    chmod +x "$TEST_DIR/mock-codex"
 }
 
 cleanup() {
@@ -652,6 +664,69 @@ test_opencode_support() {
     fi
 }
 
+test_codex_support() {
+    section "Codex CLI Support"
+
+    # Test explicit Codex tool selection via shell mode
+    output=$(run_in_shell "$TEST_DIR/repo" "echo CODEX_SHELL_OK" --codex-bin "$TEST_DIR/mock-codex" --tool codex 2>&1)
+    if contains "CODEX_SHELL_OK" "$output"; then
+        pass "Codex tool selection works (shell mode)"
+    else
+        fail "Codex tool selection does not work"
+    fi
+
+    # Test custom codex binary outside standard mounts executes (auto-runtime mount)
+    output=$($SCRIPT --state-base "$TEST_DIR/codex-runtime-state" --codex-bin "$TEST_DIR/mock-codex" --tool codex "$TEST_DIR/repo" 2>&1 || true)
+    if contains "MOCK_CODEX_STARTED" "$output"; then
+        pass "Custom --codex-bin executes via runtime auto-mount"
+    else
+        fail "Custom --codex-bin should execute even outside standard mounts"
+    fi
+
+    # Test invalid tool name includes codex in error
+    output=$($SCRIPT --tool invalid "$TEST_DIR/repo" 2>&1 || true)
+    if contains "codex" "$output"; then
+        pass "Invalid tool error mentions codex"
+    else
+        fail "Invalid tool error should mention codex"
+    fi
+
+    # Test Codex state directory
+    local codex_state="$TEST_DIR/codex-sandboxes"
+    mkdir -p "$codex_state"
+    run_in_shell "$TEST_DIR/repo" "true" --state-base "$codex_state" --codex-bin "$TEST_DIR/mock-codex" --tool codex >/dev/null 2>&1
+    if [[ -d "$codex_state/repo/home" ]]; then
+        pass "Codex uses correct state directory"
+    else
+        fail "Codex state directory not created correctly"
+    fi
+
+    # Test that .codex directory IS created in Codex HOME
+    rm -rf "$codex_state"
+    mkdir -p "$codex_state"
+    run_in_shell "$TEST_DIR/repo" "true" --state-base "$codex_state" --codex-bin "$TEST_DIR/mock-codex" --tool codex >/dev/null 2>&1
+    if [[ -d "$codex_state/repo/home/.codex" ]]; then
+        pass "Codex HOME contains .codex directory"
+    else
+        fail "Codex HOME should have .codex directory"
+    fi
+
+    # Test that .claude directory is NOT created in Codex HOME
+    if [[ ! -d "$codex_state/repo/home/.claude" ]]; then
+        pass "Codex HOME does not contain .claude directory"
+    else
+        fail "Codex HOME should not have .claude directory"
+    fi
+
+    # Test that codex binary is NOT mounted at ~/.local/bin (uses nvm/system mount instead)
+    output=$(run_in_shell "$TEST_DIR/repo" "test -f ~/.local/bin/codex && echo MOUNTED || echo NOT_MOUNTED" --codex-bin "$TEST_DIR/mock-codex" --tool codex 2>&1)
+    if contains "NOT_MOUNTED" "$output"; then
+        pass "Codex binary not mounted at ~/.local/bin (uses nvm/system path)"
+    else
+        fail "Codex binary should not be mounted at ~/.local/bin"
+    fi
+}
+
 test_host_verification() {
     section "Host-Side Mount Verification (requires sudo)"
 
@@ -776,6 +851,7 @@ main() {
     test_options_ephemeral_home
     test_mock_claude
     test_opencode_support
+    test_codex_support
     test_host_verification
     test_edge_cases
 

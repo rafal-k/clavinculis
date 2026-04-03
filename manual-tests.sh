@@ -67,6 +67,7 @@ echo -e "${GREEN}✓ bubblewrap installed${RESET}"
 
 HAS_CLAUDE=0
 HAS_OPENCODE=0
+HAS_CODEX=0
 
 if command -v claude >/dev/null 2>&1; then
     echo -e "${GREEN}✓ Claude Code found in PATH${RESET}"
@@ -78,8 +79,13 @@ if command -v opencode >/dev/null 2>&1; then
     HAS_OPENCODE=1
 fi
 
-if [[ $HAS_CLAUDE -eq 0 && $HAS_OPENCODE -eq 0 ]]; then
-    echo -e "${YELLOW}⊘ No coding assistant found (Claude/OpenCode tests will be skipped)${RESET}"
+if command -v codex >/dev/null 2>&1; then
+    echo -e "${GREEN}✓ Codex CLI found in PATH${RESET}"
+    HAS_CODEX=1
+fi
+
+if [[ $HAS_CLAUDE -eq 0 && $HAS_OPENCODE -eq 0 && $HAS_CODEX -eq 0 ]]; then
+    echo -e "${YELLOW}⊘ No coding assistant found (Claude/OpenCode/Codex tests will be skipped)${RESET}"
 fi
 
 echo ""
@@ -494,7 +500,7 @@ rm -rf "$TEST_BIND_DIR"
 # ==============================================================================
 section "TEST 6: Real Coding Assistant Integration"
 
-if [[ $HAS_CLAUDE -eq 0 && $HAS_OPENCODE -eq 0 ]]; then
+if [[ $HAS_CLAUDE -eq 0 && $HAS_OPENCODE -eq 0 && $HAS_CODEX -eq 0 ]]; then
     test_result skip "Coding assistant integration" "No assistant installed"
 else
     # Test Claude Code if available
@@ -573,6 +579,45 @@ else
             test_result skip "OpenCode integration" "User skipped"
         fi
     fi
+
+    # Test Codex CLI if available
+    if [[ $HAS_CODEX -eq 1 ]]; then
+        echo ""
+        echo "This test will launch real Codex CLI inside the sandbox."
+        echo "You'll need to interact with it to verify functionality."
+        echo ""
+        echo -e "${BOLD}Instructions:${RESET}"
+        echo "  1. Codex will start in the sandbox"
+        echo "  2. If prompted, log in to your OpenAI account"
+        echo "  3. Once Codex is ready, ask it: 'show me the first 10 lines of README.md'"
+        echo "  4. Verify Codex can read the file"
+        echo "  5. Type 'exit' or Ctrl+D to quit"
+        echo ""
+        read -p "Ready to launch Codex CLI? (y/N) " -n 1 -r
+        echo
+
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            echo ""
+            echo "Launching Codex CLI..."
+            echo "─────────────────────────────────────────────────────────────"
+            "$CLAVINCULIS" --tool codex "$SCRIPT_DIR" || true
+            echo "─────────────────────────────────────────────────────────────"
+
+            if ask_user "Did Codex start successfully and respond to your query?"; then
+                test_result pass "Codex CLI launches and connects"
+            else
+                test_result fail "Codex CLI launches and connects"
+            fi
+
+            if ask_user "Could Codex read files from the repo?"; then
+                test_result pass "Codex can read repo files"
+            else
+                test_result fail "Codex can read repo files"
+            fi
+        else
+            test_result skip "Codex CLI integration" "User skipped"
+        fi
+    fi
 fi
 
 # ==============================================================================
@@ -580,7 +625,7 @@ fi
 # ==============================================================================
 section "TEST 7: Session Persistence"
 
-if [[ $HAS_CLAUDE -eq 0 && $HAS_OPENCODE -eq 0 ]]; then
+if [[ $HAS_CLAUDE -eq 0 && $HAS_OPENCODE -eq 0 && $HAS_CODEX -eq 0 ]]; then
     test_result skip "Session persistence" "No assistant installed"
 else
     # Test Claude Code session persistence
@@ -645,6 +690,39 @@ else
             fi
         else
             test_result skip "OpenCode session persistence" "User skipped"
+        fi
+    fi
+
+    # Test Codex CLI session persistence
+    if [[ $HAS_CODEX -eq 1 ]]; then
+        echo ""
+        echo "This test verifies that Codex CLI's login persists across runs."
+        echo ""
+        echo -e "${BOLD}Instructions:${RESET}"
+        echo "  1. First run: Launch Codex and log in (if not already)"
+        echo "  2. Exit Codex"
+        echo "  3. Second run: Launch Codex again"
+        echo "  4. Verify you're still logged in (no re-login prompt)"
+        echo ""
+        read -p "Test Codex CLI session persistence? (y/N) " -n 1 -r
+        echo
+
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            echo ""
+            echo "First run - logging in..."
+            "$CLAVINCULIS" --tool codex "$SCRIPT_DIR" || true
+
+            echo ""
+            echo "Second run - checking persistence..."
+            "$CLAVINCULIS" --tool codex "$SCRIPT_DIR" || true
+
+            if ask_user "Were you still logged in on the second run?"; then
+                test_result pass "Codex CLI session persistence"
+            else
+                test_result fail "Codex CLI session persistence" "Had to login again"
+            fi
+        else
+            test_result skip "Codex CLI session persistence" "User skipped"
         fi
     fi
 fi

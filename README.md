@@ -1,6 +1,6 @@
 # Clavinculis
 
-**Clavinculis** (_Claudius in vinculis_ — "Claude in chains") is a small CLI wrapper that runs **Claude Code** or **OpenCode** inside a **bubblewrap** sandbox with **hard, OS-enforced project-only visibility**.
+**Clavinculis** (_Claudius in vinculis_ — "Claude in chains") is a small CLI wrapper that runs **Claude Code**, **OpenCode**, or **Codex CLI** inside a **bubblewrap** sandbox with **hard, OS-enforced project-only visibility**.
 
 The goal is simple: Your coding assistant can see and modify **one repo** (and its own sandbox HOME), and **nothing else** on your machine.
 
@@ -16,7 +16,7 @@ Clavinculis does this using Linux namespaces via `bwrap`.
 
 ## How it works (high level)
 
-Clavinculis launches your coding assistant (`claude` or `opencode`) in a dedicated mount namespace and mounts only:
+Clavinculis launches your coding assistant (`claude`, `opencode`, or `codex`) in a dedicated mount namespace and mounts only:
 
 - your **repo** (by default at `/work/<name>` in the sandbox)
 - a **sandbox HOME**:
@@ -86,9 +86,9 @@ What it **does** provide:
 
 - Linux with user namespaces enabled (typical on modern distros)
 - `bubblewrap` (`bwrap`) installed
-- Claude Code or OpenCode installed locally (`claude` or `opencode` on PATH)
-  - Alternatively, specify the binary path with `--claude-bin` or `--opencode-bin`
-  - If both are installed, Claude Code is used by default (override with `--tool opencode`)
+- Claude Code, OpenCode, or Codex CLI installed locally (`claude`, `opencode`, or `codex` on PATH)
+  - Alternatively, specify the binary path with `--claude-bin`, `--opencode-bin`, or `--codex-bin`
+  - Auto-detection order: Claude Code → OpenCode → Codex CLI (override with `--tool`)
 
 On Debian:
 
@@ -127,7 +127,7 @@ Inside the sandbox the repo will appear at:
 
 ### Selecting the coding assistant
 
-By default, Clavinculis auto-detects which coding assistant is available (prefers Claude Code, then OpenCode). You can explicitly select one:
+By default, Clavinculis auto-detects which coding assistant is available (prefers Claude Code, then OpenCode, then Codex CLI). You can explicitly select one:
 
 ```bash
 # Use Claude Code
@@ -136,13 +136,20 @@ clavinculis --tool claude /path/to/repo
 # Use OpenCode
 clavinculis --tool opencode /path/to/repo
 
+# Use Codex CLI
+clavinculis --tool codex /path/to/repo
+
 # Specify custom binary paths
 clavinculis --opencode-bin /custom/path/to/opencode /path/to/repo
+clavinculis --codex-bin /custom/path/to/codex /path/to/repo
 ```
+
+For Codex, Clavinculis will auto-mount the runtime tree when `--codex-bin` points outside standard mounted locations (`~/.config/nvm`, `/usr`, `/usr/local`, `/opt`).
 
 **Note:** Each tool uses its own isolated state directory:
 - Claude Code: `~/.claude-sandboxes/<repo-name>/home`
 - OpenCode: `~/.opencode-sandboxes/<repo-name>/home`
+- Codex CLI: `~/.codex-sandboxes/<repo-name>/home`
 
 This ensures complete isolation between tools working on the same repository.
 
@@ -298,6 +305,7 @@ clavinculis --name client-a /path/to/repo
 # => repo appears at /work/client-a
 # => Claude Code persistent HOME: ~/.claude-sandboxes/client-a/home
 # => OpenCode persistent HOME: ~/.opencode-sandboxes/client-a/home
+# => Codex CLI persistent HOME: ~/.codex-sandboxes/client-a/home
 ```
 
 ## Verify isolation (host-side, definitive)
@@ -309,6 +317,8 @@ While your coding assistant is running under Clavinculis:
 pgrep -u "$USER" -n -a claude
 # For OpenCode
 pgrep -u "$USER" -n -a opencode
+# For Codex CLI
+pgrep -u "$USER" -n -a codex
 
 # Take the PID and check mounts
 sudo cat /proc/<PID>/mountinfo | grep -E ' /work/| /home/| /tmp '
@@ -347,7 +357,8 @@ Results from a typical run: 36 tests passed, 6 skipped (sudo-only tests and envi
 - **Headless browsers:** Firefox, Chromium, and Chrome work in headless mode out of the box. Shared memory (`/dev/shm`), fonts, and machine-id are properly configured. Nested sandboxing is allowed, so browsers can create their own internal sandbox without conflicts. GUI browsers (with display) are not supported as X11/Wayland are not mounted.
 - **Git & SSH:** By default, your `~/.ssh` is not mounted, so git-over-SSH from inside the sandbox will not work unless you use `--with-ssh` and `--with-gitconfig`. Many users prefer to keep git operations outside the agent for safety and reviewability.
 - **Networking:** The sandbox shares the network namespace so the coding assistant can function. If you want an "offline review shell", use `--shell` and modify the script to unshare net (out of scope for default operation).
-- **Compatibility:** Default strict profile (synthetic `/etc`) works perfectly for Claude Code and OpenCode. If something breaks, use `--profile balanced` or `--profile compat` / `--full-etc` for more host compatibility (at the cost of exposing host metadata).
+- **Compatibility:** Default strict profile (synthetic `/etc`) works perfectly for Claude Code, OpenCode, and Codex CLI. If something breaks, use `--profile balanced` or `--profile compat` / `--full-etc` for more host compatibility (at the cost of exposing host metadata).
+- **Codex CLI:** Codex is distributed as an npm package (`@openai/codex`) with a Node.js launcher and platform-specific native binary package (for example `@openai/codex-linux-x64`). Clavinculis runs Codex from its installed runtime location so module resolution works, and does not use a `--codex-share` directory.
 
 ## License
 
