@@ -148,7 +148,9 @@ OPTIONS
       Host path to the 'claude' executable (default: command -v claude).
 
   --claude-share PATH
-      Host path to the Claude share dir (default: ~/.local/share/claude).
+      Optional legacy Claude share dir to mount read-only.
+      Default: use ~/.local/share/claude only if it exists.
+               Apt/native Claude installs keep state in the sandbox HOME.
 
   --opencode-bin PATH
       Host path to the 'opencode' executable (default: command -v opencode).
@@ -228,6 +230,7 @@ WITH_SSH=0
 TOOL=""                # empty = auto-detect, "claude", "opencode", or "codex"
 CLAUDE_BIN="$(command -v claude || true)"
 CLAUDE_SHARE="${HOME}/.local/share/claude"
+CLAUDE_SHARE_EXPLICIT=0
 OPENCODE_BIN="$(command -v opencode || true)"
 OPENCODE_SHARE="${HOME}/.local/share/opencode"
 CODEX_BIN="$(command -v codex || true)"
@@ -274,7 +277,7 @@ while [[ $# -gt 0 ]]; do
     --bind-ro)          BIND_RO_LIST+=("${2:-}"); shift 2;;
     --bind-rw)          BIND_RW_LIST+=("${2:-}"); shift 2;;
     --claude-bin)       CLAUDE_BIN="${2:-}"; shift 2;;
-    --claude-share)     CLAUDE_SHARE="${2:-}"; shift 2;;
+    --claude-share)     CLAUDE_SHARE="${2:-}"; CLAUDE_SHARE_EXPLICIT=1; shift 2;;
     --opencode-bin)     OPENCODE_BIN="${2:-}"; shift 2;;
     --opencode-share)   OPENCODE_SHARE="${2:-}"; shift 2;;
     --codex-bin)        CODEX_BIN="${2:-}"; shift 2;;
@@ -392,8 +395,15 @@ if [[ "$NEED_TOOL" -eq 1 ]]; then
     [[ -n "$CLAUDE_BIN" ]] || die "claude not found in PATH (use --claude-bin)"
     TOOL_BIN_REAL="$(readlink -f "$CLAUDE_BIN" || true)"
     [[ -x "$TOOL_BIN_REAL" ]] || die "Missing/invalid claude bin: $TOOL_BIN_REAL"
-    [[ -d "$CLAUDE_SHARE" ]] || die "Missing claude share dir: $CLAUDE_SHARE (use --claude-share)"
-    TOOL_SHARE="$CLAUDE_SHARE"
+    if [[ -d "$CLAUDE_SHARE" ]]; then
+      TOOL_SHARE="$CLAUDE_SHARE"
+    elif [[ "$CLAUDE_SHARE_EXPLICIT" -eq 1 ]]; then
+      die "Missing claude share dir: $CLAUDE_SHARE"
+    else
+      # Native/apt Claude stores its state under ~/.claude and ~/.claude.json,
+      # both of which live in the persistent sandbox HOME.
+      TOOL_SHARE=""
+    fi
     TOOL_NAME="claude"
   elif [[ "$TOOL" == "opencode" ]]; then
     [[ -n "$OPENCODE_BIN" ]] || die "opencode not found in PATH (use --opencode-bin)"

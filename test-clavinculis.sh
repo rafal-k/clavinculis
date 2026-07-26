@@ -599,6 +599,20 @@ test_mock_claude() {
     fi
 }
 
+test_native_claude_without_share() {
+    section "Native Claude Without Legacy Share Dir"
+
+    # Native/apt Claude keeps state in the sandbox HOME and does not require
+    # the legacy ~/.local/share/claude directory.
+    local state_base="$TEST_DIR/claude-native-state"
+    output=$($SCRIPT --state-base "$state_base" --claude-bin "$TEST_DIR/mock-claude" --tool claude "$TEST_DIR/repo" 2>&1 || true)
+    if contains "MOCK_CLAUDE_STARTED" "$output"; then
+        pass "Claude runs without a legacy share directory"
+    else
+        fail "Claude should run without a legacy share directory"
+    fi
+}
+
 test_opencode_support() {
     section "OpenCode Support"
 
@@ -850,6 +864,7 @@ main() {
     test_options_mask_secrets
     test_options_ephemeral_home
     test_mock_claude
+    test_native_claude_without_share
     test_opencode_support
     test_codex_support
     test_host_verification
