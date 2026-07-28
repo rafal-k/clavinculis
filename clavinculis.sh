@@ -119,6 +119,13 @@ OPTIONS
       Mount HOST_PATH read-write at SANDBOX_PATH inside sandbox.
       Can be repeated. Example: --bind-rw /host/data:/work/data
 
+  --compare PATH
+      Mount an additional repository READ-ONLY alongside the primary repo,
+      for browsing/comparing code safely. Mounted at <mount-base>/<basename>.
+      Can be repeated. Basename collisions are auto-suffixed (-2, -3, ...).
+      Secret masking (--mask-env/--mask-secrets) also covers compare repos.
+      Example: cvcs myapp --compare ../myapp-fork --compare ~/src/reference
+
   --with-gitconfig
       Mount ~/.gitconfig read-only inside sandbox (enables git author identity).
       Convenience for: --bind-ro ~/.gitconfig:/home/$USER/.gitconfig
@@ -251,6 +258,9 @@ fi
 BIND_RO_LIST=()
 BIND_RW_LIST=()
 
+# Additional repos to mount read-only for comparison (--compare)
+COMPARE_LIST=()
+
 SRC=""
 CMD_AFTER_DASHDASH=()
 SEEN_DASHDASH=0
@@ -276,6 +286,7 @@ while [[ $# -gt 0 ]]; do
     --with-ssh)         WITH_SSH=1; shift;;
     --bind-ro)          BIND_RO_LIST+=("${2:-}"); shift 2;;
     --bind-rw)          BIND_RW_LIST+=("${2:-}"); shift 2;;
+    --compare)          COMPARE_LIST+=("${2:-}"); shift 2;;
     --claude-bin)       CLAUDE_BIN="${2:-}"; shift 2;;
     --claude-share)     CLAUDE_SHARE="${2:-}"; CLAUDE_SHARE_EXPLICIT=1; shift 2;;
     --opencode-bin)     OPENCODE_BIN="${2:-}"; shift 2;;
@@ -373,6 +384,53 @@ SANDBOX_REPO="${MOUNT_BASE%/}/${NAME}"
 # Prevent mount collision with /home
 if [[ "$SANDBOX_REPO" == /home/* ]]; then
   die "Repo cannot be mounted under /home (conflicts with sandbox HOME at /home/\$USER)"
+fi
+
+# Resolve --compare repos: canonicalize, dedup, assign collision-free sandbox paths
+COMPARE_SRC=()
+COMPARE_SANDBOX=()
+if (( ${#COMPARE_LIST[@]} > 0 )); then
+  USED_NAMES=("$NAME")   # sandbox names already taken (primary first)
+  for cpath in "${COMPARE_LIST[@]}"; do
+    [[ -n "$cpath" ]] || die "--compare requires a path argument"
+    [[ -d "$cpath" ]] || die "--compare dir missing: $cpath"
+    csrc="$(cd "$cpath" && pwd -P)"
+
+    # Skip if it resolves to the primary repo
+    if [[ "$csrc" == "$SRC_REPO" ]]; then
+      echo "WARNING: --compare '$cpath' resolves to the primary repo; skipping" >&2
+      continue
+    fi
+    # Skip duplicates
+    dup=0
+    for existing in "${COMPARE_SRC[@]}"; do
+      [[ "$csrc" == "$existing" ]] && { dup=1; break; }
+    done
+    if [[ "$dup" -eq 1 ]]; then
+      echo "WARNING: --compare '$cpath' already mounted; skipping duplicate" >&2
+      continue
+    fi
+
+    # Derive a collision-free sandbox name from the basename
+    cbase="$(basename "$csrc")"
+    cname="$cbase"
+    n=2
+    while :; do
+      collision=0
+      for used in "${USED_NAMES[@]}"; do
+        [[ "$cname" == "$used" ]] && { collision=1; break; }
+      done
+      [[ "$collision" -eq 0 ]] && break
+      cname="${cbase}-${n}"
+      n=$((n + 1))
+    done
+    USED_NAMES+=("$cname")
+
+    csandbox="${MOUNT_BASE%/}/${cname}"
+    [[ "$csandbox" == /home/* ]] && die "Compare repo cannot be mounted under /home: $csandbox"
+    COMPARE_SRC+=("$csrc")
+    COMPARE_SANDBOX+=("$csandbox")
+  done
 fi
 
 # Coding assistant paths (host) — only needed if we are actually going to launch one.
@@ -932,6 +990,17 @@ else
   BWRAP_ARGS+=( --bind "$SRC_REPO" "$SANDBOX_REPO" )
 fi
 
+# Mount --compare repos read-only and report the resulting layout
+if (( ${#COMPARE_SRC[@]} > 0 )); then
+  echo "Repository layout inside sandbox:" >&2
+  echo "  ${SRC_REPO} -> ${SANDBOX_REPO} (primary, $([[ "$RO_REPO" -eq 1 ]] && echo ro || echo rw))" >&2
+  for i in "${!COMPARE_SRC[@]}"; do
+    add_dir_chain "${COMPARE_SANDBOX[$i]}"
+    BWRAP_ARGS+=( --ro-bind "${COMPARE_SRC[$i]}" "${COMPARE_SANDBOX[$i]}" )
+    echo "  ${COMPARE_SRC[$i]} -> ${COMPARE_SANDBOX[$i]} (ro)" >&2
+  done
+fi
+
 # Process convenience flags (convert to bind mounts)
 if [[ "$WITH_GITCONFIG" -eq 1 ]]; then
   if [[ -f "${HOME}/.gitconfig" ]]; then
@@ -992,42 +1061,54 @@ for bind_spec in "${BIND_RW_LIST[@]}"; do
   BWRAP_ARGS+=( --bind "$host_path" "$sandbox_path" )
 done
 
-# Optional OS-level masking (applies inside sandbox target path)
-if [[ "$MASK_ENV" -eq 1 ]]; then
+# Optional OS-level masking (applies inside sandbox target path).
+# mask_repo <host-src> <sandbox-target>: overlays empty file/dir placeholders
+# over .env files and secrets/ dirs found in the given repo.
+mask_repo() {
+  local src="$1" sandbox="$2" rel tgt l f d
 
-  # Warn on symlink matches (mount operations follow symlinks; masking them could target unexpected paths)
-  while IFS= read -r -d '' l; do
-    rel="${l#"$SRC_REPO"/}"
-    echo "WARNING: --mask-env: skipping symlink (not masking): $rel" >&2
-  done < <(
-    find "$SRC_REPO" -type l \( -name '.env' -o -name '.env.*' \)       ! -name '.env.example' ! -name '.env.sample' ! -name '.env.template'       -print0 2>/dev/null
-  )
+  if [[ "$MASK_ENV" -eq 1 ]]; then
+    # Warn on symlink matches (mount operations follow symlinks; masking them could target unexpected paths)
+    while IFS= read -r -d '' l; do
+      rel="${l#"$src"/}"
+      echo "WARNING: --mask-env: skipping symlink (not masking): ${sandbox%/}/${rel}" >&2
+    done < <(
+      find "$src" -type l \( -name '.env' -o -name '.env.*' \)       ! -name '.env.example' ! -name '.env.sample' ! -name '.env.template'       -print0 2>/dev/null
+    )
 
-  while IFS= read -r -d '' f; do
-    rel="${f#"$SRC_REPO"/}"
-    tgt="${SANDBOX_REPO%/}/${rel}"
-    BWRAP_ARGS+=( --ro-bind-try "$EMPTY_FILE" "$tgt" )
-  done < <(
-    find "$SRC_REPO" -type f \( -name '.env' -o -name '.env.*' \)       ! -name '.env.example' ! -name '.env.sample' ! -name '.env.template'       -print0 2>/dev/null
-  )
-fi
+    while IFS= read -r -d '' f; do
+      rel="${f#"$src"/}"
+      tgt="${sandbox%/}/${rel}"
+      BWRAP_ARGS+=( --ro-bind-try "$EMPTY_FILE" "$tgt" )
+    done < <(
+      find "$src" -type f \( -name '.env' -o -name '.env.*' \)       ! -name '.env.example' ! -name '.env.sample' ! -name '.env.template'       -print0 2>/dev/null
+    )
+  fi
 
-if [[ "$MASK_SECRETS" -eq 1 ]]; then
-  # Warn on symlink matches (mount operations follow symlinks)
-  while IFS= read -r -d '' l; do
-    rel="${l#"$SRC_REPO"/}"
-    echo "WARNING: --mask-secrets: skipping symlink (not masking): $rel" >&2
-  done < <(
-    find "$SRC_REPO" -type l -name 'secrets' -print0 2>/dev/null
-  )
+  if [[ "$MASK_SECRETS" -eq 1 ]]; then
+    # Warn on symlink matches (mount operations follow symlinks)
+    while IFS= read -r -d '' l; do
+      rel="${l#"$src"/}"
+      echo "WARNING: --mask-secrets: skipping symlink (not masking): ${sandbox%/}/${rel}" >&2
+    done < <(
+      find "$src" -type l -name 'secrets' -print0 2>/dev/null
+    )
 
-  while IFS= read -r -d '' d; do
-    rel="${d#"$SRC_REPO"/}"
-    tgt="${SANDBOX_REPO%/}/${rel}"
-    BWRAP_ARGS+=( --ro-bind-try "$EMPTY_DIR" "$tgt" )
-  done < <(
-    find "$SRC_REPO" -type d -name 'secrets' -print0 2>/dev/null
-  )
+    while IFS= read -r -d '' d; do
+      rel="${d#"$src"/}"
+      tgt="${sandbox%/}/${rel}"
+      BWRAP_ARGS+=( --ro-bind-try "$EMPTY_DIR" "$tgt" )
+    done < <(
+      find "$src" -type d -name 'secrets' -print0 2>/dev/null
+    )
+  fi
+}
+
+if [[ "$MASK_ENV" -eq 1 || "$MASK_SECRETS" -eq 1 ]]; then
+  mask_repo "$SRC_REPO" "$SANDBOX_REPO"
+  for i in "${!COMPARE_SRC[@]}"; do
+    mask_repo "${COMPARE_SRC[$i]}" "${COMPARE_SANDBOX[$i]}"
+  done
 fi
 
 # DNS workaround only needed in the "full /etc" mode:

@@ -289,6 +289,22 @@ clavinculis --ro-repo /path/to/repo
 
 The coding assistant can still write to sandbox HOME (session/config/logs), but cannot modify the repo.
 
+#### Compare multiple repositories
+
+Mount extra repositories **read-only** alongside the primary repo to browse or compare code safely:
+
+```bash
+clavinculis myapp --compare ../myapp-fork --compare ~/src/reference-impl
+# => /work/myapp            (primary, read-write)
+# => /work/myapp-fork       (read-only)
+# => /work/reference-impl   (read-only)
+```
+
+- `--compare` is repeatable. Each repo is mounted read-only at `<mount-base>/<basename>`.
+- The primary repo keeps its normal write access (or honors `--ro-repo`/`--rw-repo`); only the compare repos are forced read-only.
+- Basename collisions are auto-suffixed (`dup`, `dup-2`, `dup-3`, …), and the full mount layout is printed at startup.
+- Secret masking (`--mask-env` / `--mask-secrets`) covers the compare repos as well as the primary, so their `.env` files and `secrets/` dirs are hidden too.
+
 ### Mount location customization
 
 Change where the repo appears inside the sandbox:
@@ -344,6 +360,7 @@ The test suite validates:
 - Filesystem isolation (can't access SSH keys, AWS credentials, other projects)
 - Default strict profile with synthetic /etc
 - All command-line options (--profile, --full-etc, --no-etc, --mask-env, --ro-repo, etc.)
+- Multi-repo comparison (--compare: read-only mounts, collision suffixing, masking coverage)
 - Network access and DNS resolution
 - Mount namespace isolation
 - Edge cases (paths with spaces, symlinks)

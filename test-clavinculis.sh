@@ -613,6 +613,58 @@ test_native_claude_without_share() {
     fi
 }
 
+test_compare_repos() {
+    section "Multi-Repo Comparison (--compare)"
+
+    # Second repo to mount read-only alongside the primary
+    mkdir -p "$TEST_DIR/repo-b"
+    echo "BETA MARKER" > "$TEST_DIR/repo-b/marker.txt"
+    echo "COMPARE_SECRET=leak" > "$TEST_DIR/repo-b/.env"
+
+    # Compare repo is mounted and readable
+    output=$(run_in_shell "$TEST_DIR/repo" "cat /work/repo-b/marker.txt" --compare "$TEST_DIR/repo-b")
+    if contains "BETA MARKER" "$output"; then
+        pass "Compare repo is mounted and readable"
+    else
+        fail "Compare repo should be mounted and readable"
+    fi
+
+    # Compare repo is read-only
+    output=$(run_in_shell "$TEST_DIR/repo" "echo x > /work/repo-b/newfile 2>/dev/null && echo WROTE || echo READONLY" --compare "$TEST_DIR/repo-b")
+    if contains "READONLY" "$output"; then
+        pass "Compare repo is read-only"
+    else
+        fail "Compare repo should be read-only"
+    fi
+
+    # Primary repo stays writable when a compare repo is attached
+    output=$(run_in_shell "$TEST_DIR/repo" "echo x > /work/repo/newfile && echo WROTE || echo READONLY" --compare "$TEST_DIR/repo-b")
+    if contains "WROTE" "$output"; then
+        pass "Primary repo stays writable with a compare repo attached"
+    else
+        fail "Primary repo should stay writable with a compare repo attached"
+    fi
+
+    # Basename collision: two compare repos with the same basename get suffixed
+    mkdir -p "$TEST_DIR/a/dup" "$TEST_DIR/b/dup"
+    echo "FROM_A" > "$TEST_DIR/a/dup/who.txt"
+    echo "FROM_B" > "$TEST_DIR/b/dup/who.txt"
+    output=$(run_in_shell "$TEST_DIR/repo" "cat /work/dup/who.txt; cat /work/dup-2/who.txt" --compare "$TEST_DIR/a/dup" --compare "$TEST_DIR/b/dup")
+    if contains "FROM_A" "$output" && contains "FROM_B" "$output"; then
+        pass "Basename collision is auto-suffixed (dup, dup-2)"
+    else
+        fail "Basename collision should be auto-suffixed (dup, dup-2)"
+    fi
+
+    # Secret masking covers compare repos
+    output=$(run_in_shell "$TEST_DIR/repo" "cat /work/repo-b/.env" --mask-env --compare "$TEST_DIR/repo-b")
+    if ! contains "COMPARE_SECRET" "$output"; then
+        pass "Masking covers compare repos (.env emptied)"
+    else
+        fail "Masking should cover compare repos (.env should be emptied)"
+    fi
+}
+
 test_opencode_support() {
     section "OpenCode Support"
 
@@ -865,6 +917,7 @@ main() {
     test_options_ephemeral_home
     test_mock_claude
     test_native_claude_without_share
+    test_compare_repos
     test_opencode_support
     test_codex_support
     test_host_verification
