@@ -570,6 +570,12 @@ if [[ "$NEED_TOOL" -eq 1 ]]; then
     else
       TOOL_SANDBOX_BIN="$CODEX_BIN_REAL"  # System path, same in sandbox
     fi
+  elif [[ "$TOOL_BIN_REAL" == /usr/* ]]; then
+    # System install (apt/deb, /usr/local): /usr is already mounted read-only,
+    # so run it from its real path. Mounting it at ~/.local/bin would make
+    # Claude Code misdetect a native install and download builds into HOME.
+    TOOL_SANDBOX_BIN="$TOOL_BIN_REAL"
+    TOOL_BIN_REAL=""   # No bind mount into ~/.local/bin needed
   else
     TOOL_SANDBOX_BIN="/home/$USER_NAME/.local/bin/$TOOL_NAME"
   fi
@@ -808,6 +814,14 @@ for v in HTTPS_PROXY https_proxy HTTP_PROXY http_proxy NO_PROXY no_proxy \
   fi
 done
 
+# Claude Code's self-updater cannot work in the sandbox: the binary is a
+# read-only mount (or a system install), so every start would download a new
+# build (~400 MB) into the persistent sandbox HOME without ever using it.
+# Updates belong on the host.
+if [[ "$TOOL" == "claude" ]]; then
+  BWRAP_ARGS+=( --setenv DISABLE_AUTOUPDATER 1 )
+fi
+
 # /etc handling based on ETC_MODE
 case "$ETC_MODE" in
   none)
@@ -923,7 +937,8 @@ if [[ "$NEED_TOOL" -eq 1 ]]; then
   )
 
   # Mount tool binary at ~/.local/bin (skip for tools already accessible via
-  # existing mounts, e.g. codex via nvm auto-mount, /usr, or runtime auto-mount)
+  # existing mounts: system installs under /usr, codex via nvm auto-mount or
+  # runtime auto-mount)
   if [[ -n "$TOOL_BIN_REAL" ]]; then
     BWRAP_ARGS+=( --ro-bind "$TOOL_BIN_REAL" "/home/$USER_NAME/.local/bin/$TOOL_NAME" )
   fi
