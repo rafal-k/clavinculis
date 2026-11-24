@@ -244,6 +244,7 @@ CODEX_BIN="$(command -v codex || true)"
 CODEX_BIN_REAL=""      # Canonicalized codex executable path
 CODEX_RUNTIME_HOST=""  # Extra host path to mount for custom codex installs
 CODEX_RUNTIME_SANDBOX="/tmp/.clavinculis-codex-runtime"
+TOOL_BIN_SANDBOX_DIR="/run/clavinculis/bin"  # In-sandbox only (not persisted)
 # Fallback: if codex not found via PATH, check nvm directories
 if [[ -z "$CODEX_BIN" && -d "${HOME}/.config/nvm/versions/node" ]]; then
   for _ndir in "${HOME}"/.config/nvm/versions/node/*/bin; do
@@ -527,6 +528,44 @@ if [[ "$EPHEMERAL_HOME" -eq 0 ]]; then
   elif [[ "$TOOL" == "codex" ]]; then
     mkdir -p "$PERSIST_HOME/.codex"
   fi
+  # Mount point for the tool's share dir (XDG data path the tool expects)
+  if [[ -n "${TOOL_SHARE:-}" ]]; then
+    mkdir -p "$PERSIST_HOME/.local/share/$TOOL_NAME"
+  fi
+fi
+
+# Report leftovers from older clavinculis versions in the persistent HOME.
+# Read-only checks: clavinculis never modifies or deletes anything there.
+warn_legacy_leftovers() {
+  local found=0 f
+  f="$PERSIST_HOME/.local/bin/$TOOL_NAME"
+  if [[ -f "$f" && ! -L "$f" && ! -s "$f" ]]; then
+    echo "WARNING: empty placeholder file left by an older clavinculis version: $f" >&2
+    echo "         It is not a working binary. Remove it with: rm '$f'" >&2
+    found=1
+  fi
+  if [[ "$TOOL" == "claude" ]]; then
+    f="$PERSIST_HOME/.claude.json"
+    if [[ -f "$f" ]] && grep -qE '"installMethod"[[:space:]]*:[[:space:]]*"native"' "$f"; then
+      echo "WARNING: $f has \"installMethod\": \"native\" (set by an older clavinculis version)." >&2
+      echo "         With no sandbox running, remove that key, e.g.:" >&2
+      echo "         jq 'del(.installMethod)' '$f' > '$f.tmp' && cat '$f.tmp' > '$f' && rm '$f.tmp'" >&2
+      found=1
+    fi
+    f="$PERSIST_HOME/.local/share/claude/versions"
+    if [[ -d "$f" && -n "$(ls -A "$f" 2>/dev/null)" ]]; then
+      echo "WARNING: unused Claude Code builds ($(du -sh "$f" 2>/dev/null | cut -f1)) in: $f" >&2
+      echo "         Remove them with: rm -rf '$f'/*" >&2
+      found=1
+    fi
+  fi
+  if [[ "$found" -eq 1 ]]; then
+    echo "         See README: \"Leftovers from older versions\"." >&2
+  fi
+  return 0
+}
+if [[ "$NEED_TOOL" -eq 1 && "$EPHEMERAL_HOME" -eq 0 && ( "$TOOL" == "claude" || "$TOOL" == "opencode" ) ]]; then
+  warn_legacy_leftovers
 fi
 
 # Synthetic /etc directory (used by synthetic and balanced modes)
@@ -572,12 +611,14 @@ if [[ "$NEED_TOOL" -eq 1 ]]; then
     fi
   elif [[ "$TOOL_BIN_REAL" == /usr/* ]]; then
     # System install (apt/deb, /usr/local): /usr is already mounted read-only,
-    # so run it from its real path. Mounting it at ~/.local/bin would make
-    # Claude Code misdetect a native install and download builds into HOME.
+    # so run it from its real path.
     TOOL_SANDBOX_BIN="$TOOL_BIN_REAL"
-    TOOL_BIN_REAL=""   # No bind mount into ~/.local/bin needed
+    TOOL_BIN_REAL=""   # No bind mount needed
   else
-    TOOL_SANDBOX_BIN="/home/$USER_NAME/.local/bin/$TOOL_NAME"
+    # Mount outside HOME, on the sandbox's in-memory root. A mount target inside
+    # the persistent HOME would leave an empty placeholder file on the host, and
+    # ~/.local/bin/claude would make Claude Code misdetect a native install.
+    TOOL_SANDBOX_BIN="${TOOL_BIN_SANDBOX_DIR}/$TOOL_NAME"
   fi
 else
   TOOL_SANDBOX_BIN=""
@@ -713,6 +754,11 @@ EOF
 
 # Build PATH dynamically (include nvm and /opt apps if detected)
 SANDBOX_PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/home/$USER_NAME/.local/bin"
+
+# The selected tool binary (when mounted) takes precedence over other installs
+if [[ "$TOOL_SANDBOX_BIN" == "$TOOL_BIN_SANDBOX_DIR"/* ]]; then
+  SANDBOX_PATH="${TOOL_BIN_SANDBOX_DIR}:${SANDBOX_PATH}"
+fi
 
 # Add common /opt paths for third-party software (Chrome, etc.)
 if [[ -d /opt/google/chrome ]]; then
@@ -936,14 +982,19 @@ if [[ "$NEED_TOOL" -eq 1 ]]; then
     --dir "/home/$USER_NAME/.local/share"
   )
 
-  # Mount tool binary at ~/.local/bin (skip for tools already accessible via
+  # Mount tool binary outside HOME (skip for tools already accessible via
   # existing mounts: system installs under /usr, codex via nvm auto-mount or
   # runtime auto-mount)
   if [[ -n "$TOOL_BIN_REAL" ]]; then
-    BWRAP_ARGS+=( --ro-bind "$TOOL_BIN_REAL" "/home/$USER_NAME/.local/bin/$TOOL_NAME" )
+    BWRAP_ARGS+=(
+      --dir "$TOOL_BIN_SANDBOX_DIR"
+      --ro-bind "$TOOL_BIN_REAL" "$TOOL_SANDBOX_BIN"
+    )
   fi
 
-  # Mount share dir if the tool has one (Codex is self-contained, no share dir)
+  # Mount share dir if the tool has one (Codex is self-contained, no share dir).
+  # It must stay at its XDG path; the mount point directory is part of the
+  # persistent HOME skeleton (created above), so nothing else is left behind.
   if [[ -n "$TOOL_SHARE" ]]; then
     # OpenCode needs write access to its share dir for logs; Claude Code doesn't
     if [[ "$TOOL" == "opencode" ]]; then

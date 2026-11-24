@@ -374,18 +374,20 @@ Results from a typical run: 36 tests passed, 6 skipped (sudo-only tests and envi
 - **Headless browsers:** Firefox, Chromium, and Chrome work in headless mode out of the box. Shared memory (`/dev/shm`), fonts, and machine-id are properly configured. Nested sandboxing is allowed, so browsers can create their own internal sandbox without conflicts. GUI browsers (with display) are not supported as X11/Wayland are not mounted.
 - **Git & SSH:** By default, your `~/.ssh` is not mounted, so git-over-SSH from inside the sandbox will not work unless you use `--with-ssh` and `--with-gitconfig`. Many users prefer to keep git operations outside the agent for safety and reviewability.
 - **Networking:** The sandbox shares the network namespace so the coding assistant can function. If you want an "offline review shell", use `--shell` and modify the script to unshare net (out of scope for default operation).
-- **Claude Code installations:** Native/apt Claude installations do not require `~/.local/share/claude`; their configuration and authentication state are kept in the persistent sandbox HOME. The old share directory is still supported with `--claude-share` when present. System installs (under `/usr`, e.g. apt) run from their real path; other installs are mounted read-only at `~/.local/bin/claude`. Claude Code's auto-updater is disabled inside the sandbox (`DISABLE_AUTOUPDATER=1`), so update Claude on the host.
-- **Cleaning up downloaded Claude builds:** Older clavinculis versions let Claude Code's updater download a new build (~400 MB) into each sandbox HOME on every start, and those builds were never used. After upgrading clavinculis, remove them on the host and reset the misdetected install method:
+- **Claude Code installations:** Native/apt Claude installations do not require `~/.local/share/claude`; their configuration and authentication state are kept in the persistent sandbox HOME. The old share directory is still supported with `--claude-share` when present. Claude Code's auto-updater is disabled inside the sandbox (`DISABLE_AUTOUPDATER=1`), so update Claude on the host.
+- **Where tool binaries live in the sandbox:** System installs (under `/usr`, e.g. apt) run from their real path. Other installs (a native host install, `--claude-bin`, OpenCode) are mounted read-only at `/run/clavinculis/bin/<tool>`, which comes first in the sandbox `PATH`. That location is in the sandbox's in-memory root, so nothing is written to the persistent HOME for it.
+- **What the persistent HOME contains:** `~/.claude-sandboxes/<name>/home` is the sandbox HOME, and everything written there during a session persists: Claude Code's login, settings and session history (`.claude.json`, `.claude/`), tool caches and config, and anything you add. Clavinculis itself only creates empty skeleton directories (`.config`, `.cache`, `.local/bin`, `.local/share`, the tool's state directory, and `.local/share/<tool>` when a share directory is mounted). It never modifies or deletes anything there.
+- **Leftovers from older versions:** Earlier clavinculis versions mounted the tool binary at `~/.local/bin/<tool>`. That left an empty placeholder file in the persistent HOME, made Claude Code treat the sandbox as a native install (`"installMethod": "native"` in `.claude.json`), and let its updater download an unused build (~400 MB) on every start into `.local/share/claude/versions`. Clavinculis now warns at startup when it finds any of these, but leaves them alone. To clean them up, close the sandbox and run on the host (adjust the path if you use `--state-base`; `jq` is a command-line JSON tool):
 
   ```bash
-  du -sh ~/.claude-sandboxes/*/home/.local/share/claude/versions   # see how much space they take
-  rm -rf ~/.claude-sandboxes/*/home/.local/share/claude/versions
-  for f in ~/.claude-sandboxes/*/home/.claude.json; do
-    jq 'del(.installMethod)' "$f" > "$f.tmp" && cat "$f.tmp" > "$f" && rm "$f.tmp"
-  done
+  H=~/.claude-sandboxes/<name>/home
+  du -sh "$H/.local/share/claude/versions"   # space taken by unused builds
+  rm -rf "$H/.local/share/claude/versions"/*  # delete the unused builds
+  rm -f "$H/.local/bin/claude"                # empty placeholder (check it is 0 bytes first)
+  # remove the stale install method; the file is rewritten in place to keep its permissions
+  jq 'del(.installMethod)' "$H/.claude.json" > "$H/.claude.json.tmp" \
+    && cat "$H/.claude.json.tmp" > "$H/.claude.json" && rm "$H/.claude.json.tmp"
   ```
-
-  Adjust the path if you use `--state-base`.
 - **Compatibility:** Default strict profile (synthetic `/etc`) works perfectly for Claude Code, OpenCode, and Codex CLI. If something breaks, use `--profile balanced` or `--profile compat` / `--full-etc` for more host compatibility (at the cost of exposing host metadata).
 - **Codex CLI:** Codex is distributed as an npm package (`@openai/codex`) with a Node.js launcher and platform-specific native binary package (for example `@openai/codex-linux-x64`). Clavinculis runs Codex from its installed runtime location so module resolution works, and does not use a `--codex-share` directory.
 
