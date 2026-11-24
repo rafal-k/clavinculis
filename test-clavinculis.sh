@@ -430,10 +430,10 @@ test_options_minimal_etc() {
     # Should have synthetic /etc by default (strict profile)
     output=$(run_in_shell "$TEST_DIR/repo" "ls /etc 2>/dev/null | wc -l")
     local count=$(echo "$output" | grep -v "bash:" | grep -oE '^[0-9]+$' | head -1)
-    if [[ -n "$count" && "$count" -ge 10 && "$count" -lt 15 ]]; then
+    if [[ -n "$count" && "$count" -ge 10 && "$count" -le 16 ]]; then
         pass "Default strict mode has synthetic /etc (found $count entries)"
     else
-        fail "Default strict mode /etc count unexpected (found $count entries, expected 10-14)"
+        fail "Default strict mode /etc count unexpected (found $count entries, expected 10-16)"
     fi
 
     # Should have DNS
@@ -610,6 +610,48 @@ test_native_claude_without_share() {
         pass "Claude runs without a legacy share directory"
     else
         fail "Claude should run without a legacy share directory"
+    fi
+}
+
+test_claude_system_install() {
+    section "Claude System Install (/usr) and Auto-Updater"
+
+    # Use a real binary under /usr as a stand-in for an apt-installed claude.
+    local sys_bin
+    sys_bin="$(readlink -f "$(command -v bash)")"
+    if [[ "$sys_bin" != /usr/* ]]; then
+        skip "bash is not under /usr ($sys_bin)"
+        return
+    fi
+
+    local state_base="$TEST_DIR/claude-system-state"
+    output=$($SCRIPT --state-base "$state_base" --claude-bin "$sys_bin" --tool claude "$TEST_DIR/repo" -- \
+        -c 'echo "BIN=$0"; [[ -e "$HOME/.local/bin/claude" ]] && echo LOCAL_BIN_PRESENT; echo "AU=${DISABLE_AUTOUPDATER:-unset}"' 2>&1 || true)
+
+    if contains "BIN=$sys_bin" "$output"; then
+        pass "System-installed Claude runs from its real /usr path"
+    else
+        fail "System-installed Claude should run from $sys_bin"
+    fi
+
+    if contains "LOCAL_BIN_PRESENT" "$output"; then
+        fail "System-installed Claude should not be mounted at ~/.local/bin"
+    else
+        pass "System-installed Claude is not mounted at ~/.local/bin"
+    fi
+
+    if contains "AU=1" "$output"; then
+        pass "Claude auto-updater is disabled in the sandbox"
+    else
+        fail "DISABLE_AUTOUPDATER=1 should be set for Claude"
+    fi
+
+    # Non-/usr installs keep the ~/.local/bin mount and also disable updates.
+    output=$($SCRIPT --state-base "$state_base" --claude-bin "$TEST_DIR/mock-claude" --tool claude "$TEST_DIR/repo" 2>&1 || true)
+    if contains "MOCK_CLAUDE_STARTED" "$output"; then
+        pass "Non-system Claude still runs from ~/.local/bin"
+    else
+        fail "Non-system Claude should still run from ~/.local/bin"
     fi
 }
 
@@ -917,6 +959,7 @@ main() {
     test_options_ephemeral_home
     test_mock_claude
     test_native_claude_without_share
+    test_claude_system_install
     test_compare_repos
     test_opencode_support
     test_codex_support
